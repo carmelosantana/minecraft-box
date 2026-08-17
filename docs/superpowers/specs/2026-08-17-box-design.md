@@ -1,8 +1,8 @@
-# Blink — Design Spec (v0.1.0)
+# The Box — Design Spec (v0.1.0)
 
 **Date:** 2026-08-17
 **Status:** Approved for planning
-**Plugin slug:** `blink`
+**Plugin slug:** `box`
 **Ecosystem:** xpfarm.org Minecraft plugins (Paper 26.1.2 build 74, Java 25)
 
 ---
@@ -11,7 +11,7 @@
 
 A black block sits in the dark. It does not move while you are looking at it.
 
-**Blink** adds a single rare ambient horror creature to the overworld: a black shulker, spawning at
+**The Box** adds a single rare ambient horror creature to the overworld: a black shulker, spawning at
 night above ground, that binds itself to one player after eye contact and then follows them across
 the world — forever, slowly, and only ever while nobody is watching it.
 
@@ -199,7 +199,7 @@ All vanilla sound events, every one a config key:
 
 ## 4. Architecture
 
-Package root `org.xpfarm.blink`, following Curse's layout: `managers/`, `listeners/`, `commands/`,
+Package root `org.xpfarm.box`, following Curse's layout: `managers/`, `listeners/`, `commands/`,
 `models/`, `utils/`.
 
 ### 4.1 Entity configuration
@@ -282,13 +282,14 @@ matters more than usual here, because gate 7a has no headless client (§9).
 
 | Link | Value |
 |---|---|
-| Slug | `blink` |
-| Repository | `carmelosantana/minecraft-blink` |
-| Maven `artifactId` | `blink` |
+| Plugin name | The Box |
+| Slug | `box` |
+| Repository | `carmelosantana/minecraft-box` |
+| Maven `artifactId` | `box` |
 | Maven group | `org.xpfarm` |
-| Releasable JAR | `blink-0.1.0.jar` |
-| Updater destination | `blink.jar` |
-| `plugin.yml` name | `Blink` |
+| Releasable JAR | `box-0.1.0.jar` |
+| Updater destination | `box.jar` |
+| `plugin.yml` name | `TheBox` |
 
 Target version **0.1.0**. Paper **26.1.2 build 74**, Java **25**, `api-version: '26.1'`.
 License **AGPL-3.0-or-later**. Owner **Carmelo Santana**. Website **https://xpfarm.org**,
@@ -300,18 +301,18 @@ server **play.xpfarm.org**.
 
 | Command | Args | Permission |
 |---|---|---|
-| `/blink summon` | `[player]` | `blink.admin` |
-| `/blink purge` | `[player \| all]` | `blink.admin` |
-| `/blink list` | — | `blink.admin` |
-| `/blink reload` | — | `blink.admin` |
+| `/box summon` | `[player]` | `box.admin` |
+| `/box purge` | `[player \| all]` | `box.admin` |
+| `/box list` | — | `box.admin` |
+| `/box reload` | — | `box.admin` |
 
-`blink.admin` defaults to op. `blink.exempt` defaults to false — an exempt player can never be
+`box.admin` defaults to op. `box.exempt` defaults to false — an exempt player can never be
 bound, though their gaze still freezes it, because freezing is physics and binding is targeting.
 
 There is deliberately **no player-facing command to locate your stalker.** Knowing where it is
 defeats the plugin.
 
-`/blink summon` is not only an event tool: it is the only way to exercise the creature during gate 7a
+`/box summon` is not only an event tool: it is the only way to exercise the creature during gate 7a
 runtime verification, since natural spawning is rare, night-gated, and disabled by default.
 
 ---
@@ -365,7 +366,7 @@ satisfied trivially.
 
 Written to pass or fail; gate 6 unit tests and gate 7a runtime verification are built from these.
 
-1. `/blink summon` produces exactly one black shulker that fires no bullets and never self-teleports.
+1. `/box summon` produces exactly one black shulker that fires no bullets and never self-teleports.
 2. Held in a player's crosshair within tracking range with clear line of sight, its position is unchanged over 10s.
 3. With nobody looking, position moves monotonically toward its victim at the configured step rate.
 4. A wall between player and creature fails the gaze test — it moves while geometrically inside the view cone.
@@ -410,7 +411,7 @@ Recorded honestly at planning time rather than discovered at release.
   density, and disorientation intensity are unverifiable in automated runtime testing and carry to
   gate 12 as a client-behavior obligation requiring a named owner and date.
 - **Natural spawning ships disabled.** `spawn.enabled` defaults to `false` so that installing or
-  updating Blink can never surprise a server, including via an unattended updater pickup. It is
+  updating The Box can never surprise a server, including via an unattended updater pickup. It is
   enabled deliberately in config.
 
 ---
@@ -419,7 +420,7 @@ Recorded honestly at planning time rather than discovered at release.
 
 - **Entombment.** "It takes you somewhere" — contact blacks you out and you wake sealed underground,
   far from home, with it outside. Explicitly deferred and likely belongs to a **different creature**
-  rather than to Blink.
+  rather than to The Box.
 - **Starvation block-breaking.** Considered and rejected for v1: it grieves builds and fights
   protection plugins. If ever added, it ships config-gated and off by default.
 
