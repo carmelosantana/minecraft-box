@@ -10,7 +10,10 @@
  */
 package org.xpfarm.box.service;
 
+import java.util.Map;
 import java.util.Objects;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import org.bukkit.Location;
 import org.bukkit.Particle;
 import org.bukkit.World;
@@ -36,24 +39,36 @@ import org.xpfarm.box.persistence.BoxKeys;
  * <p>This is the heart of the exploit-closer. A watcher with no XP under {@code requireXpToOpen}
  * leaves the shell sealed, so a drained-dry player cannot use the creature as an invulnerable pet.
  * That decision is extracted to the pure {@link #qualifies(boolean, boolean, int)} predicate, and
- * the per-tick drain amount to {@link #drainThisTick(int, int)}; both are unit-tested exhaustively.
+ * the per-tick drain amount to the pure {@link #drainWithCarry(double, double[])} accumulator; both
+ * are unit-tested exhaustively.
+ *
+ * <h2>Exact drain rate at any loop period (fractional accumulator)</h2>
+ *
+ * A configured rate like {@code feeding.xp-per-second = 8} run every {@link #FEED_PERIOD_TICKS}
+ * ticks owes {@code 8 * 2 / 20 = 0.8} points per invocation — not an integer. Rounding each tick
+ * (e.g. a min-1 floor) would overshoot: 1 point every 2 ticks is 10/s, a 25% error on the shipped
+ * default. Instead each creature carries a fractional remainder in {@link #drainCarry}: every tick
+ * the exact fractional owe is added to the carry, the whole part is drained, and the sub-1.0
+ * remainder is kept for next tick. Over any whole second the drained total equals the configured
+ * per-second rate exactly, at any loop period. The carry is transient live-session state keyed by
+ * the creature's live entity id, never persisted, and cleared on {@link #close(Shulker)}.
  *
  * <h2>Experience is drained in points, never levels</h2>
  *
- * The amount banked always equals the amount removed from the player. Each tick the service reads
- * the gazer's <em>current total points</em> from their level and XP-bar fraction via
- * {@link Xp#totalPointsAt(int, float)}, computes the tick's drain, <em>clamps it to what the player
- * actually has</em> so it can never push them below zero, applies it with {@link Player#giveExp(int)}
- * passing the negated amount, and banks exactly that clamped amount with {@link BoxState#bank(long)}.
+ * The amount banked always equals the amount removed from the player, established by
+ * <em>measurement</em>, not estimate. Each tick the service reads the gazer's total points before
+ * and after the drain via {@link Xp#totalPointsAt(int, float)}, applies the whole-part drain with
+ * {@link Player#giveExp(int)} passing the negated amount, and banks the measured
+ * {@code before - after} difference with {@link BoxState#bank(long)}. Measuring the real delta means
+ * that even on the final near-empty tick — where {@code giveExp} floors the player at zero and may
+ * remove fewer points than asked — the banked amount is exactly what left the player.
  *
  * <p><b>Why {@code giveExp(-n)} and not {@code setTotalExperience}:</b> Bukkit's
  * {@code Player#setTotalExperience(int)} is a well-known trap — it writes the lifetime-total display
  * counter without recomputing the level and bar, so it does not reliably set a player's spendable
  * points. Paper's {@code giveExp(int)} adjusts level and bar together and is point-accurate for
- * negative deltas, removing exactly {@code n} points when the player has at least {@code n}. Because
- * this service clamps the drain to the player's current total <em>before</em> negating it, the
- * player always has at least the drained amount, so {@code giveExp(-drained)} removes precisely the
- * banked amount — banked always equals removed (acceptance check 9).
+ * negative deltas, flooring the player at zero. Banking the measured before/after difference makes
+ * banked always equal removed regardless of that floor (acceptance check 9).
  *
  * <h2>Gate-7a obligations (live-only, not unit-tested here)</h2>
  *
@@ -67,14 +82,14 @@ import org.xpfarm.box.persistence.BoxKeys;
  *       invulnerable. The decision is {@link #qualifies(boolean, boolean, int)} (unit-tested); the
  *       live peek and vulnerability are 7a.
  *   <li><b>Acceptance check 9</b> — the points removed from the gazer equal the points banked, and
- *       the gazer is never driven below zero. The arithmetic is unit-tested; the live XP transfer
- *       via {@link Player#giveExp(int)} is 7a.
+ *       the gazer is never driven below zero. The accumulator arithmetic is unit-tested; the live
+ *       measured XP transfer via {@link Player#giveExp(int)} is 7a.
  *   <li><b>Acceptance check 10</b> — crossing a stage threshold applies the new stage's max health
  *       to the creature (and a cosmetic scale change), verified against a live entity at 7a.
  * </ul>
  *
  * The only unit-testable seams are {@link #qualifies(boolean, boolean, int)} and
- * {@link #drainThisTick(int, int)}, covered by {@code FeedingLogicTest}.
+ * {@link #drainWithCarry(double, double[])}, covered by {@code FeedingLogicTest}.
  */
 public final class FeedingService {
 
@@ -92,8 +107,17 @@ public final class FeedingService {
     private final BoxConfig config;
     private final StageTable stages;
     private final SoundPlayer sounds;
+    // held for the tick loop (Task 15) to persist mutated state; not read here
     private final BoxKeys keys;
     private final BoxCodec codec;
+
+    /**
+     * Per-creature fractional drain remainder, keyed by the live entity id, so a non-integer
+     * per-tick owe (e.g. 0.8 pts at 8/s on a 2-tick period) averages to the exact configured rate
+     * over time instead of rounding up every tick. Transient live-session state, never persisted;
+     * an entry is removed on {@link #close(Shulker)}.
+     */
+    private final Map<UUID, Double> drainCarry = new ConcurrentHashMap<>();
 
     /**
      * @param config the validated configuration (feed rate, {@code requireXpToOpen}, stages, audio)
@@ -140,29 +164,29 @@ public final class FeedingService {
     }
 
     /**
-     * Points drained in a single feeding tick given a per-second rate and the tick period.
+     * The whole points to drain this tick given the exact fractional points owed and a running
+     * fractional carry, so a non-integer per-tick owe averages to the exact rate over time.
      *
-     * <p>The exact rate is {@code perSecond * period / 20} (20 ticks per second). This is floored to
-     * a whole number of points, but with a documented minimum: whenever {@code perSecond > 0} and
-     * {@code period > 0}, at least {@code 1} point is drained so a small rate still makes feeding
-     * progress instead of stalling at zero forever. A zero (or negative) rate or period drains
-     * nothing. The intermediate product is widened to {@code long} and the result clamped into
-     * {@code int} range, so a large rate never overflows to a negative amount — the return is never
-     * negative.
+     * <p>Pure and deterministic: adds {@code owedThisTick} (clamped at zero) to the incoming carry,
+     * drains the whole part, and writes the sub-1.0 remainder back into {@code carryInOut[0]} for
+     * the next tick. Because only the fractional remainder is carried, the drained total over any
+     * span equals the summed owe to within one point, and over any whole number of seconds equals
+     * the configured per-second rate exactly. The return is never negative.
      *
-     * @param perSecond the configured {@code feeding.xp-per-second} rate
-     * @param period the feeding tick period in ticks (e.g. {@link #FEED_PERIOD_TICKS})
-     * @return points to drain this tick, {@code >= 0}
+     * @param owedThisTick exact points owed this tick, typically
+     *     {@code xpPerSecond * FEED_PERIOD_TICKS / 20.0}
+     * @param carryInOut a one-element array holding the fractional remainder; read on entry and
+     *     updated in place to the new remainder ({@code 0.0 <= carry < 1.0})
+     * @return whole points to drain this tick, {@code >= 0}
      */
-    public static int drainThisTick(int perSecond, int period) {
-        if (perSecond <= 0 || period <= 0) {
-            return 0;
+    public static int drainWithCarry(double owedThisTick, double[] carryInOut) {
+        double total = carryInOut[0] + Math.max(0.0, owedThisTick);
+        long whole = (long) Math.floor(total);
+        if (whole < 0L) {
+            whole = 0L;
         }
-        long exact = (long) perSecond * period / 20L;
-        if (exact <= 0L) {
-            return 1; // documented minimum so a sub-integer rate still progresses
-        }
-        return exact > Integer.MAX_VALUE ? Integer.MAX_VALUE : (int) exact;
+        carryInOut[0] = total - whole;
+        return whole > Integer.MAX_VALUE ? Integer.MAX_VALUE : (int) whole;
     }
 
     /**
@@ -203,16 +227,23 @@ public final class FeedingService {
         // Open and expose: a fully-peeked shulker is vulnerable, which is the point.
         box.setPeek(1.0f);
 
-        // Drain in POINTS, clamped to what the gazer actually holds so they never go below zero.
-        int currentPoints = Math.max(0, Xp.totalPointsAt(gazer.getLevel(), gazer.getExp()));
-        int wanted = drainThisTick(config.xpPerSecond(), FEED_PERIOD_TICKS);
-        int drained = Math.min(wanted, currentPoints);
-        if (drained > 0) {
-            // Paper's giveExp adjusts level+bar together and is point-accurate for negatives;
-            // because drained <= currentPoints, exactly `drained` points are removed. Banked ==
-            // removed by construction.
-            gazer.giveExp(-drained);
-            s.bank(drained);
+        // Exact fractional points owed this tick, run through the per-creature carry so the long-run
+        // rate is exact at any loop period (no per-tick rounding overshoot).
+        double owed = config.xpPerSecond() * (double) FEED_PERIOD_TICKS / 20.0;
+        UUID id = box.getUniqueId();
+        double[] carry = {drainCarry.getOrDefault(id, 0.0)};
+        int wanted = drainWithCarry(owed, carry);
+        drainCarry.put(id, carry[0]);
+
+        if (wanted > 0) {
+            // Measure the real points removed rather than estimating: Paper's giveExp floors the
+            // player at zero, so on the final near-empty tick fewer than `wanted` may leave. Banking
+            // the measured before/after difference makes banked == removed exactly (never levels).
+            int before = Xp.totalPointsAt(gazer.getLevel(), gazer.getExp());
+            gazer.giveExp(-wanted);
+            int after = Xp.totalPointsAt(gazer.getLevel(), gazer.getExp());
+            long removed = Math.max(0L, (long) before - after);
+            s.bank(removed);
         }
 
         streamFeedParticles(box, gazer, tickCounter);
@@ -227,6 +258,8 @@ public final class FeedingService {
      */
     public void close(Shulker box) {
         box.setPeek(0.0f);
+        // Drop the transient fractional carry so the map does not leak entries for closed creatures.
+        drainCarry.remove(box.getUniqueId());
     }
 
     /**

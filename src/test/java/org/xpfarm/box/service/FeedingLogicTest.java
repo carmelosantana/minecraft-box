@@ -59,46 +59,74 @@ class FeedingLogicTest {
     }
 
     // ---------------------------------------------------------------------------------------
-    // drainThisTick(perSecond, period) — floor of perSecond*period/20, min 1 while rate > 0.
+    // drainWithCarry(owedThisTick, carry) — fractional accumulator; whole part out, remainder kept.
     // ---------------------------------------------------------------------------------------
 
-    /** A zero (or negative) rate drains nothing; a zero/negative period drains nothing. */
-    @Test void zeroRateOrPeriodDrainsNothing() {
-        assertEquals(0, FeedingService.drainThisTick(0, 2));
-        assertEquals(0, FeedingService.drainThisTick(-4, 2));
-        assertEquals(0, FeedingService.drainThisTick(8, 0));
-        assertEquals(0, FeedingService.drainThisTick(8, -2));
+    /** A zero (or negative) owe drains nothing and leaves the carry untouched. */
+    @Test void zeroOweDrainsNothingAndKeepsCarry() {
+        double[] carry = {0.4};
+        assertEquals(0, FeedingService.drainWithCarry(0.0, carry));
+        assertEquals(0.4, carry[0], 1e-12);
+        assertEquals(0, FeedingService.drainWithCarry(-3.0, carry)); // negative owe clamped to 0
+        assertEquals(0.4, carry[0], 1e-12);
     }
 
-    /** Exact division cases: perSecond*period is a clean multiple of 20. */
-    @Test void exactDivisionMatchesRate() {
-        // 8/s over a 20-tick (1s) period -> 8 points.
-        assertEquals(8, FeedingService.drainThisTick(8, 20));
-        // 20/s over a 2-tick period -> 40/20 = 2 points.
-        assertEquals(2, FeedingService.drainThisTick(20, 2));
-        // 10/s over a 10-tick period -> 100/20 = 5 points.
-        assertEquals(5, FeedingService.drainThisTick(10, 10));
+    /** An exact-integer owe with no carry drains it whole and leaves a zero remainder. */
+    @Test void integerOweDrainsWhole() {
+        double[] carry = {0.0};
+        assertEquals(2, FeedingService.drainWithCarry(2.0, carry));
+        assertEquals(0.0, carry[0], 1e-12);
     }
 
-    /** Sub-integer results floor, but a positive rate always drains at least one point so
-     * feeding actually progresses (documented minimum). 8/s over a 2-tick period is 0.8 -> 1. */
-    @Test void smallRateFloorsToMinimumOne() {
-        assertEquals(1, FeedingService.drainThisTick(8, 2));  // 16/20 = 0.8 -> floor 0 -> min 1
-        assertEquals(1, FeedingService.drainThisTick(1, 1));  // 1/20  = 0.05 -> min 1
-        assertEquals(1, FeedingService.drainThisTick(19, 1)); // 19/20 -> min 1
+    /** A single sub-integer owe drains nothing yet and banks the fraction into the carry. */
+    @Test void subIntegerOweAccumulatesIntoCarry() {
+        double[] carry = {0.0};
+        assertEquals(0, FeedingService.drainWithCarry(0.8, carry)); // 0.8 -> floor 0
+        assertEquals(0.8, carry[0], 1e-12);
+        assertEquals(1, FeedingService.drainWithCarry(0.8, carry)); // 1.6 -> 1, carry 0.6
+        assertEquals(0.6, carry[0], 1e-12);
     }
 
-    /** The floor drops the fractional part above the minimum: 25/s over 2 ticks is 2.5 -> 2. */
-    @Test void largerRateFloorsFraction() {
-        assertEquals(2, FeedingService.drainThisTick(25, 2));  // 50/20 = 2.5 -> 2
-        assertEquals(4, FeedingService.drainThisTick(9, 10));  // 90/20 = 4.5 -> 4
+    /**
+     * The exploit-relevant guarantee: a rate that does not divide evenly still averages to the
+     * exact per-second total. 8/s over a 2-tick feed period owes 0.8 per invocation; across the 10
+     * invocations that make up one second the accumulator drains exactly 8 points — not the 10 a
+     * per-tick min-1 floor would have produced — and returns the carry to zero.
+     */
+    @Test void accumulatorAveragesToExactRateOverOneSecond() {
+        double owedPerInvocation = 8 * 2 / 20.0; // = 0.8
+        double[] carry = {0.0};
+        long total = 0;
+        for (int i = 0; i < 10; i++) { // 10 invocations * 2 ticks = 20 ticks = 1 second
+            total += FeedingService.drainWithCarry(owedPerInvocation, carry);
+        }
+        assertEquals(8L, total);
+        assertEquals(0.0, carry[0], 1e-9);
     }
 
-    /** A large rate/period does not overflow int (intermediate widened to long, result clamped
-     * into int range). {@code MAX_VALUE*20/20 == MAX_VALUE}; a naive {@code int} multiply would
-     * wrap negative and violate the never-negative contract. */
-    @Test void largeInputsDoNotOverflowOrGoNegative() {
-        assertEquals(Integer.MAX_VALUE, FeedingService.drainThisTick(Integer.MAX_VALUE, 20));
-        assertTrue(FeedingService.drainThisTick(Integer.MAX_VALUE, Integer.MAX_VALUE) >= 0);
+    /** Another non-dividing rate: 5/s over a 2-tick period owes 0.5; ten invocations drain 5. */
+    @Test void accumulatorExactForHalfPointOwe() {
+        double[] carry = {0.0};
+        long total = 0;
+        for (int i = 0; i < 10; i++) {
+            total += FeedingService.drainWithCarry(5 * 2 / 20.0, carry); // 0.5 each
+        }
+        assertEquals(5L, total);
+        assertEquals(0.0, carry[0], 1e-9);
+    }
+
+    /** An evenly-dividing rate drains the same whole amount every tick with no remainder. */
+    @Test void accumulatorSteadyForIntegerOwe() {
+        double[] carry = {0.0};
+        for (int i = 0; i < 10; i++) {
+            assertEquals(2, FeedingService.drainWithCarry(20 * 2 / 20.0, carry)); // 2.0 each
+            assertEquals(0.0, carry[0], 1e-12);
+        }
+    }
+
+    /** The whole part is never negative even if a caller seeds a nonsensical negative carry. */
+    @Test void drainIsNeverNegative() {
+        double[] carry = {-0.5};
+        assertTrue(FeedingService.drainWithCarry(0.2, carry) >= 0);
     }
 }
