@@ -169,18 +169,18 @@ Settled by research during the interview rather than left to be discovered at ga
 
 ## 2. Repository
 
-- [ ] Repository is `carmelosantana/minecraft-<slug>` with an SSH `origin` and `main` branch.
-- [ ] Existing user-owned worktree changes were identified and preserved.
-- [ ] No `herobrinesystems` references remain in source, metadata, workflows, remotes, or documentation.
+- [x] Repository is `carmelosantana/minecraft-box` with an SSH `origin` and `main` branch. Created public `2026-08-17` (`https://github.com/carmelosantana/minecraft-box`, visibility `PUBLIC` — the updater fetches release assets unauthenticated). Origin is `git@github.com:carmelosantana/minecraft-box.git`; `main` pushed and tracking.
+- [x] Existing user-owned worktree changes were identified and preserved. None existed — the local repository was initialised by this pipeline at gate 1 and contained only the design spec and this checklist.
+- [x] No `herobrinesystems` references remain in source, metadata, workflows, remotes, or documentation. `rg -n 'herobrinesystems' . --hidden -g '!target/**' -g '!.git/**'` returns exactly one hit: line 174 of this checklist, which is this check's own text, byte-identical to line 26 of the pristine `templates/NEW_PLUGIN_CHECKLIST.md`. No reference exists in source, metadata, workflows, or the remote.
 
 ## 3. Metadata
 
-- [ ] AGPL-3.0-or-later `LICENSE` and Maven license metadata are present and consistent.
-- [ ] `https://xpfarm.org` metadata and Carmelo Santana author metadata are present.
-- [ ] `play.xpfarm.org` is recorded as the public Minecraft server hostname where server identity is documented.
-- [ ] New work uses the `org.xpfarm` Maven group, or an existing-coordinate compatibility decision is documented.
-- [ ] Repository slug, artifact, releasable JAR, updater destination, and `plugin.yml` names are consistent.
-- [ ] No secrets committed in source, defaults, tests, logs, history, or documentation.
+- [x] AGPL-3.0-or-later `LICENSE` and Maven license metadata are present and consistent. Full 661-line AGPL-3.0 text; `pom.xml` declares "GNU Affero General Public License v3.0 or later" pointing at `https://www.gnu.org/licenses/agpl-3.0.html`. Source files carry the matching AGPL header.
+- [x] `https://xpfarm.org` metadata and Carmelo Santana author metadata are present. `pom.xml` `<url>` and `<developers>`; `plugin.yml` `website:` and `author:`; repository homepage set to `https://xpfarm.org`.
+- [x] `play.xpfarm.org` is recorded as the public Minecraft server hostname where server identity is documented. `README.md` "Playing" section, noting the one hostname serves both Java and Bedrock clients.
+- [x] New work uses the `org.xpfarm` Maven group, or an existing-coordinate compatibility decision is documented. `org.xpfarm:box:0.1.0`. No carve-out applied — this is new work.
+- [x] Repository slug, artifact, releasable JAR, updater destination, and `plugin.yml` names are consistent. slug `box` → repo `carmelosantana/minecraft-box` → `<artifactId>box</artifactId>` → built `target/box-0.1.0.jar` → updater destination `box.jar` → `plugin.yml` `name: TheBox`. Verified against the chain gate 1 recorded; nothing was renamed to fit.
+- [x] No secrets committed in source, defaults, tests, logs, history, or documentation. No credentials, tokens, endpoints, or production configuration exist in the tree — the plugin has no external integrations at all.
 
 ## 4. Compatibility
 
@@ -195,6 +195,13 @@ Settled by research during the interview rather than left to be discovered at ga
 - [ ] Endpoint failure cannot fail server/plugin startup, and diagnostics redact secrets.
 
 ## 6. Tests and build
+
+> Left entirely unticked — gate 6 belongs to `minecraft-plugin-dev`, and none of these boxes can be
+> truthfully claimed for a scaffold with no behavior in it. Recorded only as scaffold evidence, not
+> as a gate claim: `PluginDescriptorTest.java` was laid down from the toolkit template, and
+> `mvn --batch-mode --no-transfer-progress clean verify` succeeded locally on `2026-08-17`
+> (6 tests, 0 failures; shaded `target/box-0.1.0.jar` produced). That proves the scaffold builds and
+> the descriptor parses — it proves nothing about the creature, which does not exist yet.
 
 - [ ] Unit tests cover separable logic, configuration, serialization, permissions, and failure paths where applicable.
 - [ ] `PluginDescriptorTest` parses `plugin.yml` and `config.yml` with SnakeYAML and asserts `name`, `main`, a `String`-typed `api-version`, a fully-substituted `version`, every command the code looks up, every permission the code checks, and the declared soft dependencies.
@@ -211,9 +218,9 @@ Settled by research during the interview rather than left to be discovered at ga
 
 ## 8. CI/CD
 
-- [ ] Identical standard plugin Actions workflow is installed with the required triggers, Temurin 25 build, artifact, checksum, and release behavior.
-- [ ] Successful main Actions run is recorded before tagging.
-- [ ] Workflow permissions contain no broader access than the documented contract.
+- [x] Identical standard plugin Actions workflow is installed with the required triggers, Temurin 25 build, artifact, checksum, and release behavior. `.github/workflows/build.yml` matches `GITHUB_ACTIONS.md` exactly — triggers on push to `main`, `v*` tags, PRs targeting `main`, and `workflow_dispatch`; `actions/checkout@v7`; `actions/setup-java@v5` with Temurin 25 and the Maven cache; `mvn --batch-mode --no-transfer-progress clean verify`; checksums generated from inside `target/` so `SHA256SUMS.txt` records bare filenames rather than `target/`-prefixed paths; `actions/upload-artifact@v7` excluding `original-*`; tag runs use `gh release view` / `gh release create` then upload with `--clobber`.
+- [ ] Successful main Actions run is recorded before tagging. **Not this skill's to tick** — `minecraft-plugin-release` owns gate 8b. The first push did trigger run `32073852618` on commit `0e7b423`, `in_progress` at scaffold exit; its conclusion is unverified here.
+- [x] Workflow permissions contain no broader access than the documented contract. `permissions: contents: write` and nothing else.
 
 ## 9. Release
 
