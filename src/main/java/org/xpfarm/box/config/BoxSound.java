@@ -56,6 +56,7 @@ public record BoxSound(String sound, float volume, float pitch, int intervalSeco
      * @return the matching {@link Sound}
      * @throws IllegalArgumentException if {@code sound} is not a known {@link Sound} constant
      */
+    @SuppressWarnings("removal") // brief mandates Sound.valueOf; it is deprecated-for-removal
     public Sound resolve() {
         try {
             return Sound.valueOf(sound);
