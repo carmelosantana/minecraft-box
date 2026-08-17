@@ -219,7 +219,7 @@ Settled by research during the interview rather than left to be discovered at ga
 ## 8. CI/CD
 
 - [x] Identical standard plugin Actions workflow is installed with the required triggers, Temurin 25 build, artifact, checksum, and release behavior. `.github/workflows/build.yml` matches `GITHUB_ACTIONS.md` exactly — triggers on push to `main`, `v*` tags, PRs targeting `main`, and `workflow_dispatch`; `actions/checkout@v7`; `actions/setup-java@v5` with Temurin 25 and the Maven cache; `mvn --batch-mode --no-transfer-progress clean verify`; checksums generated from inside `target/` so `SHA256SUMS.txt` records bare filenames rather than `target/`-prefixed paths; `actions/upload-artifact@v7` excluding `original-*`; tag runs use `gh release view` / `gh release create` then upload with `--clobber`.
-- [ ] Successful main Actions run is recorded before tagging. **Not this skill's to tick** — `minecraft-plugin-release` owns gate 8b. The first push did trigger run `32073852618` on commit `0e7b423`, `in_progress` at scaffold exit; its conclusion is unverified here.
+- [ ] Successful main Actions run is recorded before tagging. **Not this skill's to tick** — `minecraft-plugin-release` owns gate 8b, and it must verify the run for the commit actually being tagged, which does not exist yet. Recorded as scaffold evidence only: the first two `main` pushes both concluded `success` — run `32073852618` on `0e7b423` and run `32073960252` on `9995c20`. Later pushes are not covered by this note.
 - [x] Workflow permissions contain no broader access than the documented contract. `permissions: contents: write` and nothing else.
 
 ## 9. Release
