@@ -1,0 +1,162 @@
+# The Box configuration
+# https://xpfarm.org
+#
+# Every value is range-checked on load. An invalid value is logged and replaced with the
+# default below; configuration never fails plugin or server startup.
+
+# Natural spawning.
+#
+# Disabled by default on purpose. The Box acts on every player unprompted, so installing or
+# updating it must be inert until an operator turns it on. Use /box summon to exercise it
+# without enabling natural spawns.
+spawn:
+  enabled: false
+  # Seconds between spawn rolls per eligible player.
+  check-interval-seconds: 300
+  # Probability (0.0 - 1.0) that one roll produces a creature.
+  chance: 0.08
+  # Creature spawns within this band of the player, in blocks.
+  min-distance: 24
+  max-distance: 48
+  # Hard caps. One creature per player is the design intent; raising this is not supported.
+  per-player-cap: 1
+  server-cap: 4
+  # Require direct sky access on the spawn block. This is what keeps it out of caves.
+  require-sky-access: true
+  # Overworld night window, in ticks.
+  night-start: 13000
+  night-end: 23000
+  # Never spawn within this many blocks of world spawn.
+  min-distance-from-world-spawn: 128
+
+# Gaze detection.
+gaze:
+  # Cosine of the half-angle of the view cone. 0.6 is roughly a 106-degree cone.
+  fov-cosine: 0.6
+  # Maximum distance at which a gaze can freeze the creature, in blocks. Clamped at runtime
+  # to the server's entity tracking range -- a player cannot freeze what was never sent to
+  # their client.
+  max-distance: 48
+  # Continuous ticks of gaze required to bind an unbound creature to a player.
+  lock-on-ticks: 10
+  ignore-creative: true
+  ignore-spectator: true
+
+# Movement while unobserved.
+movement:
+  max-step-up: 1
+  max-step-down: 3
+  # Maximum vertical face height the creature will climb, in blocks.
+  max-climb-height: 24
+  allow-ceiling-traversal: true
+
+# Feeding.
+feeding:
+  # Experience POINTS drained per second, not levels.
+  xp-per-second: 8
+  # The creature stays sealed for a watcher with nothing to drain. This is deliberate --
+  # the open shell is the only vulnerable window, so a zero-XP player must not be free bait.
+  require-xp-to-open: true
+
+# Growth stages. Advanced by cumulative banked experience points.
+stages:
+  1:
+    xp-threshold: 0
+    max-health: 30.0
+    step-interval-ticks: 20
+    feed-radius: 6.0
+    kills-on-contact: false
+  2:
+    xp-threshold: 400
+    max-health: 60.0
+    step-interval-ticks: 14
+    feed-radius: 8.0
+    kills-on-contact: false
+  3:
+    xp-threshold: 1600
+    max-health: 100.0
+    step-interval-ticks: 8
+    feed-radius: 10.0
+    kills-on-contact: true
+
+# Starvation. The longer it goes unfed, the faster and louder it gets, so turtling is not free.
+starvation:
+  enabled: true
+  # Seconds unfed before starvation begins to apply.
+  onset-seconds: 300
+  # Seconds unfed at which the multipliers below are fully applied.
+  max-seconds: 1800
+  # Step interval is multiplied by this at full starvation. Lower is faster.
+  step-interval-multiplier: 0.5
+  volume-multiplier: 1.5
+
+# Disorientation applied once, when the creature first binds to a player.
+disorientation:
+  enabled: true
+  nausea-ticks: 120
+  darkness-ticks: 100
+
+# Contact resolution.
+contact:
+  # Distance at which the creature is considered to have reached its victim, in blocks.
+  radius: 1.5
+  # Effects applied on a non-lethal contact.
+  blindness-ticks: 200
+  nausea-ticks: 300
+
+# Audio. Every key is a vanilla sound event, safe on both Java and Bedrock with no
+# resource pack. Point these at custom pack sounds only if you also ship a Bedrock pack
+# through Geyser -- Geyser does not convert Java packs.
+audio:
+  dormant-ambience:
+    sound: BLOCK_SCULK_SENSOR_CLICKING
+    volume: 0.6
+    pitch: 0.5
+  lock-on-sting:
+    sound: BLOCK_SCULK_SHRIEKER_SHRIEK
+    volume: 1.0
+    pitch: 0.7
+  proximity-pulse:
+    sound: ENTITY_WARDEN_HEARTBEAT
+    volume: 0.8
+    pitch: 0.8
+  movement:
+    sound: BLOCK_SCULK_SPREAD
+    volume: 0.3
+    pitch: 0.5
+  feeding:
+    sound: ENTITY_EXPERIENCE_ORB_PICKUP
+    volume: 0.7
+    pitch: 0.5
+  opening:
+    sound: ENTITY_SHULKER_OPEN
+    volume: 0.9
+    pitch: 0.4
+  death:
+    sound: ENTITY_WARDEN_DEATH
+    volume: 1.0
+    pitch: 0.6
+  haunting:
+    sound: MUSIC_DISC_11
+    volume: 0.5
+    pitch: 1.0
+    # Seconds between haunting fragments played to the victim alone. 0 disables.
+    interval-seconds: 900
+
+# The cursed artifact dropped on death.
+artifact:
+  material: ECHO_SHARD
+  display-name: Cursed Artifact
+  # Fraction of the creature's banked experience returned when the artifact is consumed.
+  xp-return-ratio: 0.75
+  # When TheCurse is installed, the artifact also gains curse-starting behavior.
+  curse-integration: true
+
+# Creature lifetime.
+lifetime:
+  # Minutes a creature waits for an offline victim before releasing the binding.
+  offline-dormant-minutes: 30
+  # Hours before a creature is despawned regardless of state. 0 disables the cap.
+  max-lifetime-hours: 0
+  # On victim death, release the binding and revert to dormant rather than waiting.
+  unbind-on-victim-death: true

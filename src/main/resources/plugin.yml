@@ -1,0 +1,23 @@
+name: TheBox
+version: '${project.version}'
+main: org.xpfarm.box.BoxPlugin
+api-version: '26.1'
+author: Carmelo Santana
+website: https://xpfarm.org
+description: Rare nocturnal stalker that moves only while unobserved and feeds on the experience of whoever watches it
+
+softdepend: [TheCurse]
+
+commands:
+  box:
+    description: Summon, inspect, and purge The Box creatures
+    usage: /box <summon [player] | purge <player|all> | list | reload>
+    aliases: [thebox]
+
+permissions:
+  box.admin:
+    description: Summon, purge, list, and reload The Box
+    default: op
+  box.exempt:
+    description: Holder can never be bound as a victim; their gaze still freezes the creature
+    default: false
