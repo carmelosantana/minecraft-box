@@ -64,6 +64,25 @@ The drain and the kill are one system: the fight costs exactly what the creature
 
 ## 3. The creature
 
+### 3.0 Definitions
+
+**Qualifying observer.** A player who, at evaluation time, satisfies all of: the creature is inside
+their configured FOV cone; line of sight is unobstructed; they are within the gaze distance clamp
+(§4.2); they are not a spectator; and they are not in creative mode when `gaze.ignore-creative` is
+set. Only qualifying observers freeze it, and only qualifying observers can be fed on. The term is
+used throughout with exactly this meaning.
+
+**XP accounting is in total experience points, not levels.** All draining, banking, artifact storage,
+and return are computed in points so partial levels are exact and never rounded away; player-facing
+messaging may still speak in levels. `feeding.xp-per-second` is points per second.
+
+**Contact** means the creature occupies a position within `contact.radius` (default 1.5 blocks) of its
+bound victim while not frozen.
+
+**It never interacts with non-victims.** Contact resolution, damage, and the kill apply only to the
+creature's bound victim. Any other player may freeze it, be fed on if they look at it from within
+feed radius, and fight it — but it will never pursue, strike, or kill them.
+
 ### 3.1 States
 
 | State | Meaning |
@@ -146,7 +165,11 @@ This exists specifically so that turtling is not free.
 
 - **Contact below Gorged:** drains everything the victim has and applies heavy disorientation. Survivable. It walks away much stronger.
 - **Contact at Gorged:** kills.
-- **Victim dies by any cause:** it releases them and goes `WAITING` where it stands. Dying is an escape; it is still out there.
+- **Victim dies by any cause:** governed by `lifetime.unbind-on-victim-death`. When `true` (default) it
+  releases the binding entirely and reverts to `DORMANT` where it stands — still out there, still
+  lockable by anyone who looks at it, including the player who just died. When `false` it retains the
+  binding and enters `WAITING` until that player returns. Dying is an escape either way; the default
+  makes it a clean one.
 - **Creature dies:** drops exactly one cursed artifact carrying its banked XP.
 
 ### 3.9 The artifact
@@ -321,6 +344,11 @@ durations), `audio` (every sound key with volume and pitch), `artifact` (materia
 ratio, curse integration), `lifetime` (offline dormancy minutes, max lifetime, unbind on victim
 death).
 
+**Default values are deliberately not fixed in this spec.** The key set above is the contract; the
+numbers behind it are tuning, and tuning this creature is a play-testing exercise rather than a design
+one. Implementation ships defensible starting values, and §8 check 19 guarantees bad values degrade
+safely rather than failing startup.
+
 ### 7.3 Persistence
 
 Entity PDC as source of truth; flat-file index in the plugin data folder for recovery and unloaded
@@ -356,7 +384,10 @@ Written to pass or fail; gate 6 unit tests and gate 7a runtime verification are 
 17. **Starvation beyond the configured threshold measurably shortens the step interval.**
 18. With `TheCurse` absent, the plugin enables cleanly and the artifact still returns XP.
 19. Invalid config values log and fall back to defaults without failing startup.
-20. A Bedrock player via Floodgate sees the shulker, hears the configured sounds, and receives the effects identically to Java. *(gate-12 client obligation — §9)*
+20. A non-victim player standing in the creature's path is never pursued, struck, or killed by it.
+21. On victim death with `unbind-on-victim-death: true`, it reverts to `DORMANT` and can be locked again.
+22. XP transfer is exact in experience points across a full drain-kill-consume cycle, with no rounding loss at level boundaries.
+23. A Bedrock player via Floodgate sees the shulker, hears the configured sounds, and receives the effects identically to Java. *(gate-12 client obligation — §9)*
 
 ---
 
