@@ -81,9 +81,10 @@ import org.xpfarm.box.service.SpawnService;
  * entity does not resolve); compute gazers over online players; if <em>any</em> gazer freeze and run
  * lock-on plus feeding; if <em>none</em> close the shell, step toward the victim, test contact; then
  * update audio and persist the possibly-mutated {@link BoxState} back to the entity PDC (the source
- * of truth). A monotonic {@code tickCounter} advances by {@code PERIOD} each iteration so it counts
- * elapsed server ticks, which is what {@link MovementService#stepIfDue}'s step-boundary modulo and
- * {@link FeedingService#feedTick}'s cadence expect.
+ * of truth). A monotonic {@code iterationCounter} advances by one each iteration; because one
+ * iteration is {@code PERIOD} ticks, {@link MovementService#stepIfDue} paces in iteration units so an
+ * odd tick-interval cannot mis-fire against it (spec §3.7), while lock-on accrues its streak in
+ * server ticks (each iteration = {@code PERIOD} ticks) to match {@code gaze.lock-on-ticks}.
  *
  * <h2>Known limitation — offline-expiry durability (obligation C)</h2>
  *
@@ -306,10 +307,11 @@ public final class BoxPlugin extends JavaPlugin {
 
     /**
      * The every-2-tick creature driver (spec §4.9). One instance per wiring generation, holding the
-     * config-holding services and its own transient state: the monotonic {@code tickCounter} (in
-     * server ticks) and the per-unbound-creature continuous-gaze streak used for lock-on binding.
+     * config-holding services and its own transient state: the monotonic {@code iterationCounter}
+     * (one per {@link #PERIOD} ticks) and the per-unbound-creature continuous-gaze streak used for
+     * lock-on binding.
      *
-     * <p>Reload builds a fresh {@code TickLoop}, so its {@code tickCounter} and gaze streaks reset —
+     * <p>Reload builds a fresh {@code TickLoop}, so its {@code iterationCounter} and gaze streaks reset —
      * an in-progress lock restarts, which is acceptable for the rare reload path.
      *
      * <p><strong>Live path (gate 7a).</strong> Everything below drives real entities, players, and
@@ -331,15 +333,28 @@ public final class BoxPlugin extends JavaPlugin {
         private final MovementService movement;
         private final SoundPlayer sounds;
 
-        /** Elapsed server ticks; advanced by {@link #PERIOD} each iteration (obligation D). */
-        private long tickCounter;
+        /**
+         * Loop-iteration count (one iteration per {@link #PERIOD} server ticks); advanced by one each
+         * iteration. This is the pacing unit for {@link MovementService#stepIfDue} (obligation D):
+         * counting iterations keeps the step cadence correct at the loop's real granularity instead of
+         * mis-pacing odd tick-intervals against an even server-tick counter.
+         */
+        private long iterationCounter;
 
         /**
          * Per-unbound-creature continuous-gaze streak for lock-on: creature id &rarr; (owning player,
-         * unbroken gaze iterations). Transient; reconciled against the live set each iteration and
-         * cleared when the gaze breaks or the creature binds.
+         * unbroken gaze accrual <em>in server ticks</em>). Transient; reconciled against the live set
+         * each iteration and cleared when the gaze breaks or the creature binds.
          */
         private final Map<UUID, GazeStreak> streaks = new ConcurrentHashMap<>();
+
+        /**
+         * Creatures currently within contact radius of their victim, so the below-Gorged contact
+         * event (drain + disorientation, spec §3.8) fires once per <em>approach</em> — on the
+         * transition into contact — not every iteration while loitering. Reconciled against the live
+         * set each iteration; an id is dropped when the creature leaves contact.
+         */
+        private final Set<UUID> inContact = ConcurrentHashMap.newKeySet();
 
         TickLoop(BoxConfig config, StageTable stageTable, GazeService gaze, FeedingService feeding,
                 MovementService movement, SoundPlayer sounds) {
@@ -381,10 +396,11 @@ public final class BoxPlugin extends JavaPlugin {
                 Objects.requireNonNull(BoxPlugin.this.codec).write(pdc, state);
             }
 
-            // Obligation B: drop any drain-carry (and streak) for a creature that left this tick.
+            // Obligation B: drop any drain-carry (and transient state) for a creature that left.
             feeding.retainOnly(liveIds);
             streaks.keySet().retainAll(liveIds);
-            tickCounter += PERIOD;
+            inContact.retainAll(liveIds);
+            iterationCounter++;
         }
 
         /** One creature's full per-tick behavior: gaze &rarr; freeze/feed/lock-on | close/step/contact. */
@@ -402,7 +418,7 @@ public final class BoxPlugin extends JavaPlugin {
                 if (feeder != null) {
                     state.setPhase(BoxState.Phase.FEEDING);
                     state.setLastFedEpochSecond(now);
-                    feeding.feedTick(box, state, feeder, tickCounter);
+                    feeding.feedTick(box, state, feeder, iterationCounter);
                 } else {
                     feeding.close(box);
                 }
@@ -427,10 +443,19 @@ public final class BoxPlugin extends JavaPlugin {
                 return;
             }
 
-            // Obligation E: victim is present in this world — resume the hunt.
-            state.setPhase(BoxState.Phase.HUNTING);
             Location victimLoc = victim.getLocation();
-            movement.stepIfDue(box, state, victimLoc, now, tickCounter);
+            // Spec §3.4 / check 16: a sealed victim is unreachable — attach outside and WAIT
+            // (quiet), not HUNT (closing-in pulse). stepIfDue is already a no-op when sealed; this
+            // fixes the STATE and AUDIO to match the spec.
+            if (movement.isSealedFrom(box, victimLoc)) {
+                state.setPhase(BoxState.Phase.WAITING);
+                updateAudio(box, state, null);
+                return;
+            }
+
+            // Obligation E: victim is present and reachable in this world — resume the hunt.
+            state.setPhase(BoxState.Phase.HUNTING);
+            movement.stepIfDue(box, state, victimLoc, now, iterationCounter);
             testContact(box, state, victim, now);
             updateAudio(box, state, victim);
         }
@@ -472,9 +497,10 @@ public final class BoxPlugin extends JavaPlugin {
             int ticks;
             if (owner == null) {
                 owner = bindable.get(0); // gaze switched owner: restart the streak
-                ticks = 1;
+                ticks = BoxCommand.accrueGaze(0, PERIOD);
             } else {
-                ticks = prev.ticks + 1;
+                // Accrue in SERVER TICKS (each iteration is PERIOD ticks); lock-on-ticks is in ticks.
+                ticks = BoxCommand.accrueGaze(prev.ticks, PERIOD);
             }
             streaks.put(id, new GazeStreak(owner.getUniqueId(), ticks));
 
@@ -536,13 +562,20 @@ public final class BoxPlugin extends JavaPlugin {
          * disorientation (survivable — it walks away much stronger).
          */
         private void testContact(Shulker box, BoxState state, Player victim, long now) {
+            UUID id = box.getUniqueId();
             double radius = config.contactRadius();
             if (box.getLocation().distanceSquared(victim.getLocation()) > radius * radius) {
+                inContact.remove(id); // left contact: a later re-approach fires the event again
                 return;
             }
             if (stageFor(state).killsOnContact()) {
                 victim.setHealth(0.0);
                 return;
+            }
+            // Below Gorged: a discrete "drains everything then walks away" event (spec §3.8), applied
+            // once per approach — only on the transition INTO contact, never refreshed while loitering.
+            if (!inContact.add(id)) {
+                return; // already in contact this approach; the drain already self-limited to empty
             }
             int points = org.xpfarm.box.model.Xp.totalPointsAt(victim.getLevel(), victim.getExp());
             if (points > 0) {
@@ -561,14 +594,16 @@ public final class BoxPlugin extends JavaPlugin {
          * creature closes; a faint dormant ambience otherwise. Cosmetic, cadence-throttled.
          */
         private void updateAudio(Shulker box, BoxState state, @Nullable Player victim) {
-            long iteration = tickCounter / PERIOD;
             if (victim != null && state.phase() == BoxState.Phase.HUNTING) {
                 double dist = box.getLocation().distance(victim.getLocation());
                 long every = Math.max(1L, Math.round(dist / 6.0)); // closer -> more frequent
-                if (iteration % every == 0L) {
+                if (iterationCounter % every == 0L) {
                     sounds.playTo(victim, "proximity-pulse");
                 }
-            } else if (state.phase() == BoxState.Phase.DORMANT && iteration % 40L == 0L) {
+            } else if ((state.phase() == BoxState.Phase.DORMANT
+                    || state.phase() == BoxState.Phase.WAITING) && iterationCounter % 40L == 0L) {
+                // Quiet ambience for dormant AND waiting (e.g. outside a sealed volume) — never the
+                // closing-in pulse, which is reserved for an active, reachable hunt.
                 sounds.play(box.getLocation(), "dormant-ambience");
             }
         }

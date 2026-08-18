@@ -152,6 +152,23 @@ public final class BoxCommand implements CommandExecutor, TabCompleter {
         return continuousGazeTicks >= lockOnTicks;
     }
 
+    /**
+     * Accrues one more continuous-gaze loop iteration onto a streak, <em>in server ticks</em>
+     * (headless-testable seam, consumed by the {@code BoxPlugin} tick loop). Because the loop runs
+     * every {@code periodTicks} server ticks but {@code gaze.lock-on-ticks} is expressed in ticks
+     * (see {@link org.xpfarm.box.config.BoxConfig#lockOnTicks()}), each iteration adds {@code
+     * periodTicks} — not 1 — so a streak compared against {@code lockOnTicks} via
+     * {@link #shouldBind(int, int)} binds after the documented number of ticks rather than {@code
+     * periodTicks}&times; too slow. Call with {@code prevTicks == 0} for the first gaze iteration.
+     *
+     * @param prevTicks the streak's accrued ticks so far ({@code 0} to start a fresh streak)
+     * @param periodTicks the loop period in server ticks
+     * @return the streak's new accrued tick count
+     */
+    public static int accrueGaze(int prevTicks, long periodTicks) {
+        return prevTicks + (int) periodTicks;
+    }
+
     @Override
     public boolean onCommand(@NotNull CommandSender sender, @NotNull Command command,
             @NotNull String label, @NotNull String[] args) {

@@ -124,21 +124,32 @@ public final class MovementService {
      * <p><strong>Live path (gate 7a).</strong> The block probe, teleport, and attach face require a
      * running server and are not unit-tested.
      *
+     * <p><strong>Pacing is in loop-iteration units, not raw server ticks.</strong> The driving loop
+     * runs once every {@link org.xpfarm.box.service.FeedingService#FEED_PERIOD_TICKS} ticks, so its
+     * counter only ever takes multiples of that period. Firing on a raw <em>tick</em> interval would
+     * mis-pace: for an odd tick-interval {@code k} an even counter's {@code % k} lands only every
+     * {@code 2k} ticks (half rate), which starvation scaling can invert — a hungrier creature (which
+     * must step <em>faster</em>) stepping slower. {@link #effectiveIntervalIterations} converts the
+     * scaled tick-interval into whole iterations so the effective ticks-between-steps is monotonically
+     * non-increasing as the creature starves, at the loop's real granularity.
+     *
      * @param box the live creature to move (a no-op when {@code null})
      * @param s the creature's mutable state, for its stage and last-fed baseline
      * @param victimLoc the victim's current location (a no-op when {@code null})
      * @param nowSecond the current epoch second, for the starvation elapsed time
-     * @param tickCounter the monotonically increasing server tick, for the step-boundary modulo
+     * @param iterationCounter the monotonically increasing loop-iteration count, for the step-boundary
+     *     modulo (one iteration per {@link org.xpfarm.box.service.FeedingService#FEED_PERIOD_TICKS}
+     *     ticks)
      */
     public void stepIfDue(Shulker box, BoxState s, Location victimLoc, long nowSecond,
-            long tickCounter) {
+            long iterationCounter) {
         if (box == null || s == null || victimLoc == null) {
             return;
         }
         int base = stageStepIntervalTicks(config, s.stageIndex());
         double multiplier = StarvationCurve.multiplier(nowSecond - s.lastFedEpochSecond(), config);
-        long interval = effectiveInterval(base, multiplier);
-        if (tickCounter % interval != 0L) {
+        long interval = effectiveIntervalIterations(base, multiplier, FeedingService.FEED_PERIOD_TICKS);
+        if (iterationCounter % interval != 0L) {
             return;
         }
 
@@ -250,5 +261,30 @@ public final class MovementService {
     public static long effectiveInterval(int baseIntervalTicks, double starvationMultiplier) {
         long scaled = Math.round(baseIntervalTicks * starvationMultiplier);
         return Math.max(1L, scaled);
+    }
+
+    /**
+     * The effective step interval expressed in <em>loop iterations</em> rather than raw ticks: the
+     * starvation-scaled tick-interval divided by the loop period and rounded, floored at one. This is
+     * the pacing unit {@link #stepIfDue} actually uses, because the driving loop only advances its
+     * counter once per {@code periodTicks} ticks.
+     *
+     * <p><strong>Monotonicity (the correctness property).</strong> The scaled tick-interval
+     * {@code round(base * mult)} is non-increasing as {@code mult} decreases, and dividing by a fixed
+     * period then rounding and flooring preserves that, so the effective ticks-between-steps
+     * ({@code result * periodTicks}) never <em>increases</em> as the creature starves — the inversion
+     * a raw even-counter modulo on an odd tick-interval would otherwise cause (spec §3.7). The floor
+     * keeps the caller's modulo from dividing by zero without distorting the rate.
+     *
+     * @param baseIntervalTicks the stage's base interval in ticks
+     * @param starvationMultiplier the {@link StarvationCurve#multiplier} factor
+     * @param periodTicks the driving loop's period in ticks (one iteration per this many ticks)
+     * @return the step interval in whole loop iterations, always {@code >= 1}
+     */
+    public static long effectiveIntervalIterations(int baseIntervalTicks, double starvationMultiplier,
+            long periodTicks) {
+        long scaledTicks = Math.round(baseIntervalTicks * starvationMultiplier);
+        long iterations = Math.round(scaledTicks / (double) periodTicks);
+        return Math.max(1L, iterations);
     }
 }
