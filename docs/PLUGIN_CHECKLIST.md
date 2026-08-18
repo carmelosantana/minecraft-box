@@ -259,8 +259,8 @@ Not a gate. Deployment is updater pickup: a verified release plus a correct mani
 this lifecycle owes. Leaving this section entirely unticked is the normal resting state and blocks
 nothing — not release, not enrolment, not handoff.
 
-- [ ] Enrolment confirmed live and correct: release sound, manifest entry on `origin/main`, gate 10 genuinely completed.
-- [ ] Deployment evidence recorded, if and only if an operator relayed some. Otherwise note "enrolled, not known to be deployed" and leave unticked.
+- [x] Enrolment confirmed live and correct: release sound, manifest entry on `origin/main`, gate 10 genuinely completed. Verified `2026-08-17`: release `v0.1.0` is non-draft/non-prerelease carrying exactly `box-0.1.0.jar` + `SHA256SUMS.txt` (checksum OK, gate 9); the manifest entry is on `carmelosantana/minecraft-plugin-updater@origin/main` (commit `3fff78d`, clean/undiverged) with `destination box.jar`, anchored `asset_regex ^box-[0-9].*\.jar$` matching the release JAR, no pin, `enabled` (default true); §10 Updater fully ticked; status `active`. **The Box is enrolled and ready for pickup.**
+- [ ] Deployment evidence recorded, if and only if an operator relayed some. **Enrolled, not known to be deployed.** This workstation has no Dokploy/production access, so pickup cannot be observed here — the production server installs `box.jar` on its next recreation, out of band. Left unticked deliberately; blocks nothing. An operator who observes the pickup can record it here.
 
 ## 12. Handoff
 
