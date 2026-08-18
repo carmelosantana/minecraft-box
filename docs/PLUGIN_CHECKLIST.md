@@ -184,37 +184,54 @@ Settled by research during the interview rather than left to be discovered at ga
 
 ## 4. Compatibility
 
-- [ ] Java 25/Paper 26.1.2 build 74 compile succeeds and `plugin.yml` uses `api-version: '26.1'`, matching the API compiled against (see `PLUGIN_LIFECYCLE.md` §4 — a lower value opts the JAR into Paper's `Commodore` bytecode rewrites).
-- [ ] Hard dependencies, soft dependencies, optional APIs, and load ordering were reviewed and declared.
-- [ ] Geyser/Floodgate/ViaVersion review covers Bedrock-safe input, UI, inventory, identity, and protocol behavior.
+- [x] Java 25/Paper 26.1.2 build 74 compile succeeds and `plugin.yml` uses `api-version: '26.1'`, matching the API compiled against. `mvn clean verify` compiles clean on Temurin 25 against `paper-api 26.1.2.build.74-stable`; the shaded JAR's embedded `plugin.yml` shows `api-version: '26.1'`. Confirmed live at gate 7a: Paper `26.1.2` (protocol 775) loaded and enabled the plugin.
+- [x] Hard dependencies, soft dependencies, optional APIs, and load ordering were reviewed and declared. Hard deps: none. Soft-depend: `TheCurse` (declared `softdepend: [TheCurse]`). No `depend`/`loadbefore`/`loadafter` needed. Verified live: the plugin enabled cleanly with `TheCurse` **absent** — `The Box enabled; restored 0 creatures from loaded chunks` (acceptance check 18 enable clause).
+- [x] Geyser/Floodgate/ViaVersion review covers Bedrock-safe input, UI, inventory, identity, and protocol behavior. Every mechanic uses only server-side vanilla primitives (a black `Shulker`, potion effects, titles, `playSound`, `spawnParticle`, PDC, `teleport`) — no NMS, no client packets, no display entities, no blocks-on-heads. The Geyser research (§1 Known limitations) drove this. `box.exempt` gates binding, not freezing. Bedrock rendering/audio/parity is a **gate-12 client obligation** (no headless client here). Live: `floodgate`, `Geyser-Spigot`, `ViaVersion`, and `TheBox` all started green together on the Legendary stack.
 
 ## 5. External services
 
-- [ ] External integrations are disabled by default or require explicit configuration and have bounded timeouts.
-- [ ] Ollama/Umami-style external endpoints are optional and failure-tolerant when applicable.
-- [ ] Endpoint failure cannot fail server/plugin startup, and diagnostics redact secrets.
+- [x] External integrations are disabled by default or require explicit configuration and have bounded timeouts. **No external services** — `External services: none` in the header, no outbound calls anywhere in the code. Gate 5's contract is satisfied vacuously.
+- [x] Ollama/Umami-style external endpoints are optional and failure-tolerant when applicable. Not applicable — no Ollama, Umami, or any other outside-service integration.
+- [x] Endpoint failure cannot fail server/plugin startup, and diagnostics redact secrets. Not applicable — no endpoints, no secrets. Nothing the plugin does can hang on or leak an external call.
 
 ## 6. Tests and build
 
-> Left entirely unticked — gate 6 belongs to `minecraft-plugin-dev`, and none of these boxes can be
-> truthfully claimed for a scaffold with no behavior in it. Recorded only as scaffold evidence, not
-> as a gate claim: `PluginDescriptorTest.java` was laid down from the toolkit template, and
-> `mvn --batch-mode --no-transfer-progress clean verify` succeeded locally on `2026-08-17`
-> (6 tests, 0 failures; shaded `target/box-0.1.0.jar` produced). That proves the scaffold builds and
-> the descriptor parses — it proves nothing about the creature, which does not exist yet.
+> Gate 6 now satisfied by the full implementation (16 SDD tasks, each implemented and Opus-reviewed,
+> plus a whole-branch review). The scaffold note below is superseded.
 
-- [ ] Unit tests cover separable logic, configuration, serialization, permissions, and failure paths where applicable.
-- [ ] `PluginDescriptorTest` parses `plugin.yml` and `config.yml` with SnakeYAML and asserts `name`, `main`, a `String`-typed `api-version`, a fully-substituted `version`, every command the code looks up, every permission the code checks, and the declared soft dependencies.
-- [ ] `mvn --batch-mode --no-transfer-progress clean verify` succeeds.
-- [ ] The shaded releasable JAR and embedded `plugin.yml` were inspected; `original-*` JARs are excluded.
+- [x] Unit tests cover separable logic, configuration, serialization, permissions, and failure paths where applicable. **170 tests**, all green. Pure-logic cores are exhaustively unit-tested — config validation + per-key fall-back, stage table, starvation curve, gaze cone/distance math, step planner (climb/ceiling/seal), XP point math, PDC codec round-trip, registry, feeding qualify/drain accumulator, movement pacing monotonicity, lock-on timing, artifact redemption gate. Adapter decision-predicates are extracted and tested; live Bukkit paths are recorded as gate-7a/gate-12 obligations.
+- [x] `PluginDescriptorTest` parses `plugin.yml` and `config.yml` with SnakeYAML and asserts `name`, `main`, a `String`-typed `api-version`, a fully-substituted `version`, every command the code looks up, every permission the code checks, and the declared soft dependencies. Present and asserts `TheBox` / `org.xpfarm.box.BoxPlugin` / `api-version '26.1'` / substituted version / command `box` / permissions `box.admin` + `box.exempt` / softdepend `TheCurse`.
+- [x] `mvn --batch-mode --no-transfer-progress clean verify` succeeds. `BUILD SUCCESS`, `Tests run: 170, Failures: 0, Errors: 0`, on Java 25 / `paper-api 26.1.2.build.74-stable` (verified on `main` @ `e56191e`).
+- [x] The shaded releasable JAR and embedded `plugin.yml` were inspected; `original-*` JARs are excluded. `target/box-0.1.0.jar` embeds `plugin.yml` with `name: TheBox`, `main: org.xpfarm.box.BoxPlugin`, `api-version: '26.1'`, `softdepend: [TheCurse]`. The `original-box-0.1.0.jar` pre-shade intermediate is excluded from release assets by the workflow's `!target/original-*.jar` filter.
 
 ## 7. Matrix
 
-- [ ] Fresh-volume [Legendary Java Minecraft Geyser Floodgate stack](https://github.com/TheRemote/Legendary-Java-Minecraft-Geyser-Floodgate) test covers every updater-managed plugin.
-- [ ] Each updater-managed plugin's manifest `enabled` value, default state, and expected fresh-volume behavior are recorded separately.
-- [ ] Paper, Geyser, Floodgate, and ViaVersion start successfully together.
-- [ ] Affected commands, permissions, persistence, and configuration reload were exercised over RCON with no server-wide hot reload.
-- [ ] Ollama and Umami unavailable-endpoint tests keep the server and plugins available when applicable.
+### 7a — single-plugin runtime verification (this skill)
+
+- [x] Paper, Geyser, Floodgate, and ViaVersion start successfully together. Booted a fresh disposable Legendary stack (`scripts/test-stack.sh up`, `2026-08-17`). The rig confirmed Paper `Done (15.241s)`, the Java port answered a real Minecraft handshake (Paper 26.1.2, protocol 775), and RCON `plugins` listed `floodgate`, `Geyser-Spigot`, `TheBox`, and `ViaVersion` all **green** together.
+- [x] Affected commands, permissions, persistence, and configuration reload were exercised over RCON with no server-wide hot reload. `TheBox` loaded and enabled cleanly (`The Box enabled; restored 0 creatures from loaded chunks`, no exceptions). Over RCON: `/box` → usage; `/box list` → "No Box creatures are tracked."; `/box reload` → "The Box configuration reloaded." (plugin-scoped reload, re-wired services, no server hot reload); `/box purge all` → "Purged 0 creatures."; `/box summon` from console → graceful "Console must name a target" (summon is player-targeted — see limitations). **Config fall-back verified live** (check 19): injecting `spawn.chance: 2.0` and reloading logged `[TheBox] Invalid config value for 'spawn.chance': 2.0 (must be 0.0 - 1.0); falling back to default 0.08` and the plugin stayed green — a bad value never disables it. **Unparseable-YAML reload** rejected cleanly ("keeping the previous configuration") and the plugin survived on its last-good config. **Enable-without-`TheCurse`** confirmed (check 18 enable clause): `TheCurse` was absent from the stack and `TheBox` enabled clean.
+- [x] Ollama and Umami unavailable-endpoint tests keep the server and plugins available when applicable. **Not applicable** — no external services.
+
+### 7b — full-roster matrix (out-of-band, NOT required for release)
+
+- [ ] Fresh-volume Legendary stack test covers every updater-managed plugin. **Withheld — out-of-band.** Gate 7b belongs to `minecraft-plugin-matrix` and is triggered by an updater manifest change or a stack version bump, not by this `dev` run. Enrolling The Box (gate 10) will itself be a 7b trigger (roster 19 → 20); it does not block this release.
+- [ ] Each updater-managed plugin's manifest `enabled` value, default state, and expected fresh-volume behavior are recorded separately. Withheld with 7b above.
+
+### Gate 7a could not reach — carry to gate 12 as the play-test obligation
+
+The Box's entire creature loop is player-driven, and no client attaches to the gate-7a stack. `/box summon` requires an online player target, so **no creature could be spawned headlessly** — every live behavior below is unverified at runtime and must be play-tested on `play.xpfarm.org` by a named owner at gate 12:
+
+- **Spawn/appearance:** a summoned creature is a black shulker with AI off, silent, no bullets, no self-teleport (check 1).
+- **Gaze/freeze:** crosshair holds it still within tracking range; a wall occludes; a 200-block player does not freeze it (checks 2, 4, 5).
+- **Lock-on:** continuous gaze binds after `lock-on-ticks` with a one-time Nausea+Darkness sting and title; no re-fire; `box.exempt` never bound; bind-time per-player cap (checks 6, 20).
+- **Feeding/kill:** opens only for a watcher with XP; drained == banked; closed damage denied, open damage applies; growth stages change stats; contact robs below Gorged and kills at Gorged (checks 7, 8, 9, 10, 11).
+- **Movement:** steps toward victim unobserved; climbs a wall; traverses a ceiling; a sealed volume yields WAITING; starvation shortens the interval (checks 3, 14, 15, 16, 17).
+- **Persistence:** stage/victim/XP survive chunk unload and restart on a live world (check 13 — codec round-trip is unit-proven, but the live entity-PDC path is not).
+- **Death/dimension:** victim death → DORMANT/lockable; no cross-dimension pursuit (check 21).
+- **Artifact redemption:** right-clicking the dropped artifact returns XP and (with `TheCurse` present) starts a curse — **including the flagged `RIGHT_CLICK_AIR` vs `RIGHT_CLICK_BLOCK` behavior** (the interact handler uses `ignoreCancelled = true`; verify air-clicks are not suppressed) (checks 12, 18 return clause, 22).
+- **Bedrock parity + feel (check 23):** shulker appearance, all configured vanilla sounds (note: `haunting`/Disc-11 is configured but not yet scheduled — a documented deferral), particle density, and disorientation intensity, all identical for a Floodgate Bedrock client.
+
+Everything the gate *could* reach — enable, command surface, config reload + fall-back, unparseable-config safety, enable-without-`TheCurse` — passed.
 
 ## 8. CI/CD
 
