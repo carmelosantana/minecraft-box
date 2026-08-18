@@ -10,27 +10,590 @@
  */
 package org.xpfarm.box;
 
+import java.time.Instant;
+import java.util.Collection;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import net.kyori.adventure.text.Component;
+import net.kyori.adventure.text.format.NamedTextColor;
+import net.kyori.adventure.text.format.TextDecoration;
+import net.kyori.adventure.title.Title;
+import org.bukkit.Location;
+import org.bukkit.World;
+import org.bukkit.command.PluginCommand;
+import org.bukkit.entity.Entity;
+import org.bukkit.entity.Player;
+import org.bukkit.entity.Shulker;
+import org.bukkit.event.HandlerList;
+import org.bukkit.persistence.PersistentDataContainer;
 import org.bukkit.plugin.java.JavaPlugin;
+import org.bukkit.potion.PotionEffect;
+import org.bukkit.potion.PotionEffectType;
+import org.bukkit.scheduler.BukkitTask;
+import org.jetbrains.annotations.Nullable;
+import org.xpfarm.box.command.BoxCommand;
+import org.xpfarm.box.config.BoxConfig;
+import org.xpfarm.box.config.StageDef;
+import org.xpfarm.box.listener.BoxLifecycleListener;
+import org.xpfarm.box.model.BoxState;
+import org.xpfarm.box.model.StageTable;
+import org.xpfarm.box.persistence.BoxCodec;
+import org.xpfarm.box.persistence.BoxKeys;
+import org.xpfarm.box.persistence.BoxRegistry;
+import org.xpfarm.box.service.ArtifactService;
+import org.xpfarm.box.service.FeedingService;
+import org.xpfarm.box.service.GazeService;
+import org.xpfarm.box.service.MovementService;
+import org.xpfarm.box.service.SoundPlayer;
+import org.xpfarm.box.service.SpawnService;
 
 /**
- * Plugin entry point.
+ * Plugin entry point: assembles every component (Task 15 capstone wiring).
  *
- * <p>Scaffold only. Gate 4 ({@code minecraft-plugin-dev}) implements the creature itself —
- * gaze detection, unobserved movement, feeding, growth staging, and the cursed artifact.
- * The design this scaffold is built against lives at
- * {@code docs/superpowers/specs/2026-08-17-box-design.md}; the pipeline's source of truth is
- * {@code docs/PLUGIN_CHECKLIST.md}.
+ * <p><strong>Enable order</strong> (mirrors the reference {@code RedstoneTrainPlugin}).
+ * {@code config.yml} is validated into an immutable {@link BoxConfig} first — an invalid file logs
+ * the offending key and disables the plugin rather than leaving a half-wired state. Then the
+ * config-independent core is built ({@link BoxKeys}, {@link BoxCodec}, {@link BoxRegistry}),
+ * creatures are rehydrated from the PDC of every already-loaded world's shulkers, and finally
+ * {@link #wireConfigServices} builds everything that holds the config snapshot ({@link StageTable},
+ * {@link SoundPlayer}, {@link GazeService}, {@link FeedingService}, {@link MovementService},
+ * {@link SpawnService}, {@link ArtifactService}, the {@link BoxLifecycleListener}), registers the
+ * {@code /box} command, and starts the two scheduled tasks: the {@code every-2-tick} creature loop
+ * and the {@code spawn.check-interval-seconds} natural-spawn roll.
+ *
+ * <p><strong>Reload.</strong> Every config-holding service takes {@link BoxConfig} as an immutable
+ * constructor argument, so {@code /box reload} re-injects by rebuilding them (cancel the tasks,
+ * unregister the listener, swap the snapshot, wire fresh instances). On a validation error the old
+ * wiring stays untouched and the message is returned to the command. The registry, codec, and keys
+ * are config-free and survive reloads, so no creature state is lost (matching the reference and
+ * acceptance check 13's spirit).
+ *
+ * <h2>The tick loop (spec §4.9, obligation D)</h2>
+ *
+ * One task every {@link TickLoop#PERIOD} ({@code = 2}) ticks — the cadence {@link
+ * FeedingService#FEED_PERIOD_TICKS} assumes — iterating the tracked set only, never a per-player
+ * world scan. Per creature: resolve the live shulker (skip when its chunk is unloaded, i.e. the
+ * entity does not resolve); compute gazers over online players; if <em>any</em> gazer freeze and run
+ * lock-on plus feeding; if <em>none</em> close the shell, step toward the victim, test contact; then
+ * update audio and persist the possibly-mutated {@link BoxState} back to the entity PDC (the source
+ * of truth). A monotonic {@code tickCounter} advances by {@code PERIOD} each iteration so it counts
+ * elapsed server ticks, which is what {@link MovementService#stepIfDue}'s step-boundary modulo and
+ * {@link FeedingService#feedTick}'s cadence expect.
+ *
+ * <h2>Known limitation — offline-expiry durability (obligation C)</h2>
+ *
+ * The {@link BoxLifecycleListener}'s offline-dormancy deadline is a transient in-memory map, so a
+ * victim who logs out, the server restarts, and they rejoin after the timeout resumes {@code HUNTING}
+ * instead of unbinding — the deadline was lost with the map. This is <strong>accepted</strong> as
+ * join-time-only enforcement (option i in the task brief): the safer null&rarr;HUNTING default is
+ * preferred over adding an {@code offline-since} epoch to {@link BoxState}/{@link BoxCodec} and its
+ * own tick-loop enforcement (YAGNI). The window is bounded (one offline timeout, only across a
+ * restart) and the creature remains lockable by anyone. See the task report.
+ *
+ * <p>Geyser/Bedrock safety: scheduler, PDC, potion effects (Nausea/Darkness/Blindness), titles,
+ * {@code playSound}, and commands are all server-side and render identically for Bedrock players via
+ * Geyser. No client packets, no NMS.
  */
 public final class BoxPlugin extends JavaPlugin {
 
+    // Config-independent core; built once per enable, survives reloads.
+    private @Nullable BoxKeys keys;
+    private @Nullable BoxCodec codec;
+    private @Nullable BoxRegistry registry;
+
+    // Config snapshot and the services rebuilt from it on every (re)load.
+    private @Nullable BoxConfig config;
+    private @Nullable StageTable stageTable;
+    private @Nullable SoundPlayer sounds;
+    private @Nullable GazeService gaze;
+    private @Nullable FeedingService feeding;
+    private @Nullable MovementService movement;
+    private @Nullable SpawnService spawnService;
+    private @Nullable ArtifactService artifacts;
+    private @Nullable BoxLifecycleListener lifecycleListener;
+    private @Nullable BukkitTask tickTask;
+    private @Nullable BukkitTask spawnTask;
+
     @Override
     public void onEnable() {
+        // 1. Validated config snapshot; disable gracefully on a bad config.yml.
         saveDefaultConfig();
-        getLogger().info("The Box enabled (scaffold — creature behavior not yet implemented)");
+        BoxConfig loaded;
+        try {
+            loaded = BoxConfig.from(getConfig());
+        } catch (IllegalArgumentException invalid) {
+            getLogger().severe("config.yml is invalid: " + invalid.getMessage());
+            getLogger().severe("Fix the value (or delete config.yml to regenerate the defaults) and "
+                    + "restart. Disabling The Box.");
+            getServer().getPluginManager().disablePlugin(this);
+            return;
+        }
+        config = loaded;
+
+        // 2. Config-independent core.
+        keys = new BoxKeys(this);
+        codec = new BoxCodec(keys);
+        registry = new BoxRegistry();
+
+        // 3. Rehydrate creatures from already-loaded worlds; later chunk loads are handled by the
+        //    lifecycle listener's EntitiesLoad handler (registered in wireConfigServices).
+        int restored = rebuildRegistryFromLoadedWorlds();
+
+        // 4. Config-holding services, the command, and the scheduled tasks.
+        wireConfigServices(loaded);
+
+        PluginCommand command = Objects.requireNonNull(getCommand("box"),
+                "plugin.yml must declare the box command");
+        BoxCommand executor = new BoxCommand(this, registry,
+                () -> Objects.requireNonNull(spawnService),
+                () -> Objects.requireNonNull(feeding),
+                this::reloadBoxConfig);
+        command.setExecutor(executor);
+        command.setTabCompleter(executor);
+
+        getLogger().info("The Box enabled; restored " + restored
+                + (restored == 1 ? " creature" : " creatures") + " from loaded chunks.");
     }
 
     @Override
     public void onDisable() {
-        getLogger().info("The Box disabled");
+        if (tickTask != null) {
+            tickTask.cancel();
+            tickTask = null;
+        }
+        if (spawnTask != null) {
+            spawnTask.cancel();
+            spawnTask = null;
+        }
+        persistAllCreatures();
+        getLogger().info("The Box disabled.");
+    }
+
+    // ------------------------------------------------------------ config wiring
+
+    /**
+     * Builds (or rebuilds, on reload) every service that holds the immutable config snapshot,
+     * tearing down the previous generation first: both scheduled tasks are cancelled and the old
+     * lifecycle listener is unregistered. The registry, codec, and keys are config-free and are
+     * never rebuilt, so no creature state is lost across a reload.
+     */
+    private void wireConfigServices(BoxConfig fresh) {
+        if (tickTask != null) {
+            tickTask.cancel();
+        }
+        if (spawnTask != null) {
+            spawnTask.cancel();
+        }
+        if (lifecycleListener != null) {
+            HandlerList.unregisterAll(lifecycleListener);
+        }
+
+        config = fresh;
+        BoxRegistry registry = Objects.requireNonNull(this.registry);
+        BoxCodec codec = Objects.requireNonNull(this.codec);
+        BoxKeys keys = Objects.requireNonNull(this.keys);
+
+        StageTable stageTable = new StageTable(fresh.stages());
+        SoundPlayer sounds = new SoundPlayer(fresh);
+        GazeService gaze = new GazeService(fresh);
+        FeedingService feeding = new FeedingService(fresh, stageTable, sounds, keys, codec);
+        MovementService movement = new MovementService(fresh, sounds);
+        SpawnService spawnService = new SpawnService(this, fresh, registry, keys, codec);
+        ArtifactService artifacts = new ArtifactService(this, fresh, keys);
+        BoxLifecycleListener listener =
+                new BoxLifecycleListener(registry, codec, fresh, artifacts, sounds);
+
+        this.stageTable = stageTable;
+        this.sounds = sounds;
+        this.gaze = gaze;
+        this.feeding = feeding;
+        this.movement = movement;
+        this.spawnService = spawnService;
+        this.artifacts = artifacts;
+        this.lifecycleListener = listener;
+
+        getServer().getPluginManager().registerEvents(listener, this);
+
+        TickLoop loop = new TickLoop(fresh, stageTable, gaze, feeding, movement, sounds);
+        tickTask = getServer().getScheduler().runTaskTimer(this, loop, TickLoop.PERIOD,
+                TickLoop.PERIOD);
+
+        long spawnPeriod = Math.max(1L, (long) fresh.checkIntervalSeconds() * 20L);
+        spawnTask = getServer().getScheduler().runTaskTimer(this, this::rollNaturalSpawns,
+                spawnPeriod, spawnPeriod);
+    }
+
+    /**
+     * {@code /box reload}: rebuild the snapshot from disk and re-wire.
+     *
+     * @return {@code null} on success, otherwise the validation error message (the previous
+     *     configuration and wiring stay active)
+     */
+    private @Nullable String reloadBoxConfig() {
+        reloadConfig();
+        BoxConfig fresh;
+        try {
+            fresh = BoxConfig.from(getConfig());
+        } catch (IllegalArgumentException invalid) {
+            getLogger().warning("Reload rejected: " + invalid.getMessage());
+            return invalid.getMessage();
+        }
+        wireConfigServices(fresh);
+        getLogger().info("Configuration reloaded and services re-wired.");
+        return null;
+    }
+
+    /** The natural-spawn roll: one {@link SpawnService#rollFor(Player)} per online player. */
+    private void rollNaturalSpawns() {
+        SpawnService spawn = this.spawnService;
+        if (spawn == null) {
+            return;
+        }
+        for (Player player : getServer().getOnlinePlayers()) {
+            spawn.rollFor(player);
+        }
+    }
+
+    // -------------------------------------------------------- PDC persistence
+
+    /** Scans every loaded world's shulkers and restores tagged creatures. Idempotent. */
+    private int rebuildRegistryFromLoadedWorlds() {
+        BoxRegistry registry = this.registry;
+        BoxCodec codec = this.codec;
+        if (registry == null || codec == null) {
+            return 0;
+        }
+        int restored = 0;
+        for (World world : getServer().getWorlds()) {
+            for (Shulker shulker : world.getEntitiesByClass(Shulker.class)) {
+                if (registry.get(shulker.getUniqueId()).isPresent()) {
+                    continue;
+                }
+                var state = codec.read(shulker.getPersistentDataContainer());
+                if (state.isPresent()) {
+                    registry.track(shulker.getUniqueId(), state.get());
+                    restored++;
+                }
+            }
+        }
+        return restored;
+    }
+
+    /** onDisable: writes every registered creature's state to its entity PDC via the codec. */
+    private void persistAllCreatures() {
+        BoxRegistry registry = this.registry;
+        BoxCodec codec = this.codec;
+        if (registry == null || codec == null) {
+            return; // enable bailed out on an invalid config; nothing to persist
+        }
+        int persisted = 0;
+        for (BoxState state : registry.all()) {
+            if (getServer().getEntity(state.creatureId()) instanceof Shulker box) {
+                codec.write(box.getPersistentDataContainer(), state);
+                persisted++;
+            }
+        }
+        getLogger().info("Persisted " + persisted
+                + (persisted == 1 ? " creature" : " creatures") + " to PDC.");
+    }
+
+    // ------------------------------------------------------------- tick loop
+
+    /**
+     * The every-2-tick creature driver (spec §4.9). One instance per wiring generation, holding the
+     * config-holding services and its own transient state: the monotonic {@code tickCounter} (in
+     * server ticks) and the per-unbound-creature continuous-gaze streak used for lock-on binding.
+     *
+     * <p>Reload builds a fresh {@code TickLoop}, so its {@code tickCounter} and gaze streaks reset —
+     * an in-progress lock restarts, which is acceptable for the rare reload path.
+     *
+     * <p><strong>Live path (gate 7a).</strong> Everything below drives real entities, players, and
+     * world geometry and is verified against a live client (acceptance checks 1, 3, 6, 11, 20, 21 and
+     * the full end-to-end). It is deliberately not mocked.
+     */
+    private final class TickLoop implements Runnable {
+
+        /** The loop period in ticks; {@link FeedingService#FEED_PERIOD_TICKS} assumes this cadence. */
+        static final long PERIOD = FeedingService.FEED_PERIOD_TICKS;
+
+        /** Fallback entity tracking range (blocks) when a per-world value is unavailable. */
+        private static final double DEFAULT_TRACKING_RANGE = 48.0;
+
+        private final BoxConfig config;
+        private final StageTable stageTable;
+        private final GazeService gaze;
+        private final FeedingService feeding;
+        private final MovementService movement;
+        private final SoundPlayer sounds;
+
+        /** Elapsed server ticks; advanced by {@link #PERIOD} each iteration (obligation D). */
+        private long tickCounter;
+
+        /**
+         * Per-unbound-creature continuous-gaze streak for lock-on: creature id &rarr; (owning player,
+         * unbroken gaze iterations). Transient; reconciled against the live set each iteration and
+         * cleared when the gaze breaks or the creature binds.
+         */
+        private final Map<UUID, GazeStreak> streaks = new ConcurrentHashMap<>();
+
+        TickLoop(BoxConfig config, StageTable stageTable, GazeService gaze, FeedingService feeding,
+                MovementService movement, SoundPlayer sounds) {
+            this.config = config;
+            this.stageTable = stageTable;
+            this.gaze = gaze;
+            this.feeding = feeding;
+            this.movement = movement;
+            this.sounds = sounds;
+        }
+
+        @Override
+        public void run() {
+            BoxRegistry registry = BoxPlugin.this.registry;
+            if (registry == null) {
+                return;
+            }
+            long now = Instant.now().getEpochSecond();
+            Collection<? extends Player> online = getServer().getOnlinePlayers();
+            Set<UUID> liveIds = new HashSet<>();
+
+            for (BoxState state : registry.all()) {
+                UUID id = state.creatureId();
+                Entity entity = getServer().getEntity(id);
+                if (entity == null) {
+                    // Unloaded chunk (or not yet resolvable): keep tracked, keep any carry.
+                    liveIds.add(id);
+                    continue;
+                }
+                if (!(entity instanceof Shulker box) || box.isDead() || !box.isValid()) {
+                    // Gone for good with no death event (e.g. an external /kill-by-removal): untrack.
+                    registry.untrack(id);
+                    continue;
+                }
+                liveIds.add(id);
+                processCreature(box, state, online, now);
+                // The entity PDC is the source of truth: flush the (possibly mutated) state.
+                PersistentDataContainer pdc = box.getPersistentDataContainer();
+                Objects.requireNonNull(BoxPlugin.this.codec).write(pdc, state);
+            }
+
+            // Obligation B: drop any drain-carry (and streak) for a creature that left this tick.
+            feeding.retainOnly(liveIds);
+            streaks.keySet().retainAll(liveIds);
+            tickCounter += PERIOD;
+        }
+
+        /** One creature's full per-tick behavior: gaze &rarr; freeze/feed/lock-on | close/step/contact. */
+        private void processCreature(Shulker box, BoxState state,
+                Collection<? extends Player> online, long now) {
+            World world = box.getWorld();
+            double trackingRange = trackingRange(world);
+            List<Player> gazers = gaze.gazers(box, online, trackingRange);
+
+            if (!gazers.isEmpty()) {
+                // Observed: FROZEN (do not step). Run lock-on and, for a qualifying gazer, feed.
+                state.setPhase(BoxState.Phase.FROZEN);
+                runLockOn(box, state, gazers, now);
+                Player feeder = qualifyingGazer(box, state, gazers);
+                if (feeder != null) {
+                    state.setPhase(BoxState.Phase.FEEDING);
+                    state.setLastFedEpochSecond(now);
+                    feeding.feedTick(box, state, feeder, tickCounter);
+                } else {
+                    feeding.close(box);
+                }
+                return;
+            }
+
+            // Unobserved: gaze broke, so no lock accrues. Close, then step/contact if bound.
+            streaks.remove(box.getUniqueId());
+            feeding.close(box);
+
+            if (!state.isBound()) {
+                state.setPhase(BoxState.Phase.DORMANT);
+                updateAudio(box, state, null);
+                return;
+            }
+
+            Player victim = getServer().getPlayer(Objects.requireNonNull(state.victim()));
+            if (victim == null || !victim.getWorld().equals(world)) {
+                // Victim offline or in another dimension: wait where it stands.
+                state.setPhase(BoxState.Phase.WAITING);
+                updateAudio(box, state, null);
+                return;
+            }
+
+            // Obligation E: victim is present in this world — resume the hunt.
+            state.setPhase(BoxState.Phase.HUNTING);
+            Location victimLoc = victim.getLocation();
+            movement.stepIfDue(box, state, victimLoc, now, tickCounter);
+            testContact(box, state, victim, now);
+            updateAudio(box, state, victim);
+        }
+
+        /**
+         * Lock-on (spec §3.2, obligation A + box.exempt): accrue one unbound creature's continuous
+         * gaze by a single owning player and, at {@code lock-on-ticks}, bind — but only when the
+         * per-player cap still has room and the player is not {@code box.exempt}. Freezing is physics
+         * and happens for every gazer; binding is targeting and is gated here.
+         */
+        private void runLockOn(Shulker box, BoxState state, List<Player> gazers, long now) {
+            UUID id = box.getUniqueId();
+            if (state.isBound()) {
+                streaks.remove(id);
+                return;
+            }
+            // Only a non-exempt gazer may ever own the streak (box.exempt can freeze, never bind).
+            List<Player> bindable = new java.util.ArrayList<>();
+            for (Player g : gazers) {
+                if (!g.hasPermission("box.exempt")) {
+                    bindable.add(g);
+                }
+            }
+            if (bindable.isEmpty()) {
+                streaks.remove(id);
+                return;
+            }
+
+            GazeStreak prev = streaks.get(id);
+            Player owner = null;
+            if (prev != null) {
+                for (Player g : bindable) {
+                    if (g.getUniqueId().equals(prev.owner)) {
+                        owner = g;
+                        break;
+                    }
+                }
+            }
+            int ticks;
+            if (owner == null) {
+                owner = bindable.get(0); // gaze switched owner: restart the streak
+                ticks = 1;
+            } else {
+                ticks = prev.ticks + 1;
+            }
+            streaks.put(id, new GazeStreak(owner.getUniqueId(), ticks));
+
+            if (!BoxCommand.shouldBind(ticks, config.lockOnTicks())) {
+                return;
+            }
+            // Obligation A: the real "one active creature per player" guarantee lives here at bind
+            // time — the spawn gate only pre-filters dormant creatures.
+            BoxRegistry registry = Objects.requireNonNull(BoxPlugin.this.registry);
+            if (registry.countForVictim(owner.getUniqueId()) >= config.perPlayerCap()) {
+                streaks.remove(id);
+                return;
+            }
+            bind(box, state, owner, now);
+            streaks.remove(id);
+        }
+
+        /** Applies the one-time bind: victim, disorientation, sting, whispered title. */
+        private void bind(Shulker box, BoxState state, Player owner, long now) {
+            state.bindTo(owner.getUniqueId(), now);
+            state.setPhase(BoxState.Phase.HUNTING);
+            if (config.disorientationEnabled()) {
+                owner.addPotionEffect(new PotionEffect(PotionEffectType.NAUSEA,
+                        config.nauseaTicks(), 0, false, false, true));
+                owner.addPotionEffect(new PotionEffect(PotionEffectType.DARKNESS,
+                        config.darknessTicks(), 0, false, false, true));
+            }
+            sounds.play(box.getLocation(), "lock-on-sting");
+            owner.showTitle(Title.title(
+                    Component.text("", NamedTextColor.DARK_GRAY),
+                    Component.text("It sees you.", NamedTextColor.DARK_GRAY)
+                            .decoration(TextDecoration.ITALIC, true)));
+        }
+
+        /**
+         * The first gazer within the current stage's feed radius that the creature will open for
+         * (per {@link FeedingService#shouldOpen}), or {@code null} when none qualifies.
+         */
+        private @Nullable Player qualifyingGazer(Shulker box, BoxState state, List<Player> gazers) {
+            double feedRadius = stageFor(state).feedRadius();
+            double feedSq = feedRadius * feedRadius;
+            Location boxLoc = box.getLocation();
+            for (Player g : gazers) {
+                if (!g.getWorld().equals(boxLoc.getWorld())) {
+                    continue;
+                }
+                if (boxLoc.distanceSquared(g.getLocation()) <= feedSq
+                        && feeding.shouldOpen(state, g)) {
+                    return g;
+                }
+            }
+            return null;
+        }
+
+        /**
+         * Contact resolution (spec §3.8, acceptance check 11): only against the bound victim, only
+         * while unfrozen (this branch). At the Gorged stage ({@code kills-on-contact}) the victim is
+         * killed; below Gorged the creature drains everything the victim has and applies heavy
+         * disorientation (survivable — it walks away much stronger).
+         */
+        private void testContact(Shulker box, BoxState state, Player victim, long now) {
+            double radius = config.contactRadius();
+            if (box.getLocation().distanceSquared(victim.getLocation()) > radius * radius) {
+                return;
+            }
+            if (stageFor(state).killsOnContact()) {
+                victim.setHealth(0.0);
+                return;
+            }
+            int points = org.xpfarm.box.model.Xp.totalPointsAt(victim.getLevel(), victim.getExp());
+            if (points > 0) {
+                victim.giveExp(-points);
+                state.bank(points);
+                state.setLastFedEpochSecond(now);
+            }
+            victim.addPotionEffect(new PotionEffect(PotionEffectType.BLINDNESS,
+                    config.contactBlindnessTicks(), 0, false, false, true));
+            victim.addPotionEffect(new PotionEffect(PotionEffectType.NAUSEA,
+                    config.contactNauseaTicks(), 0, false, false, true));
+        }
+
+        /**
+         * Audio pulse: the warden-heartbeat proximity cue to the bound victim, quickening as the
+         * creature closes; a faint dormant ambience otherwise. Cosmetic, cadence-throttled.
+         */
+        private void updateAudio(Shulker box, BoxState state, @Nullable Player victim) {
+            long iteration = tickCounter / PERIOD;
+            if (victim != null && state.phase() == BoxState.Phase.HUNTING) {
+                double dist = box.getLocation().distance(victim.getLocation());
+                long every = Math.max(1L, Math.round(dist / 6.0)); // closer -> more frequent
+                if (iteration % every == 0L) {
+                    sounds.playTo(victim, "proximity-pulse");
+                }
+            } else if (state.phase() == BoxState.Phase.DORMANT && iteration % 40L == 0L) {
+                sounds.play(box.getLocation(), "dormant-ambience");
+            }
+        }
+
+        /**
+         * The creature's current stage definition, derived from its banked XP so a just-crossed
+         * threshold is reflected immediately (feed radius and kills-on-contact both read this).
+         */
+        private StageDef stageFor(BoxState state) {
+            return stageTable.stageFor(state.bankedXp());
+        }
+
+        /**
+         * The world's entity tracking range in blocks, defended to {@link #DEFAULT_TRACKING_RANGE}
+         * (~48, the vanilla monster tracking distance). No stable public per-world getter exists in
+         * this API, so the vanilla default is used; refining to the server's configured monster
+         * tracking range is a gate-7a tuning refinement. The {@code world} parameter is retained for
+         * that future per-world lookup.
+         */
+        private double trackingRange(World world) {
+            return world == null ? DEFAULT_TRACKING_RANGE : DEFAULT_TRACKING_RANGE;
+        }
+    }
+
+    /** An unbound creature's continuous-gaze accrual: the owning player and the unbroken count. */
+    private record GazeStreak(UUID owner, int ticks) {
     }
 }

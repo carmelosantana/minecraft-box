@@ -263,6 +263,31 @@ public final class FeedingService {
     }
 
     /**
+     * Drops the transient fractional drain-carry for a creature id without touching any live entity.
+     * The removal counterpart to {@link #close(Shulker)} for the paths where the {@link Shulker}
+     * handle is unavailable — a creature removed while its chunk is unloaded, or purged by id — so a
+     * carry entry can never be stranded (obligation B). A no-op when no entry exists.
+     *
+     * @param id the creature's entity id whose carry, if any, is dropped
+     */
+    public void forget(UUID id) {
+        drainCarry.remove(id);
+    }
+
+    /**
+     * Reconciles the drain-carry map against the set of still-live creature ids, dropping every entry
+     * whose creature is no longer tracked. Called once per tick-loop iteration as the single, complete
+     * safety net for obligation B: whatever path removed a creature — death (which untracks without a
+     * {@link #close(Shulker)}), silent despawn, {@code /box purge}, or untrack — its carry cannot
+     * outlive it. Cheap: bounded by the live-creature count.
+     *
+     * @param liveIds the entity ids of every currently-tracked creature
+     */
+    public void retainOnly(java.util.Set<UUID> liveIds) {
+        drainCarry.keySet().retainAll(liveIds);
+    }
+
+    /**
      * Recomputes the growth stage from the current bank and, when it changed, applies the new
      * stage's max health to the creature and a cosmetic scale change. Scale is best-effort only.
      */
