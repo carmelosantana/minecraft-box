@@ -330,8 +330,9 @@ runtime verification, since natural spawning is rare, night-gated, and disabled 
 | `EntityTargetLivingEntityEvent` | Suppress vanilla targeting |
 | `EntitiesLoadEvent` | Rehydrate from PDC |
 | `PlayerQuitEvent` / `PlayerJoinEvent` | Dormancy and re-bind within timeout |
-| `PlayerDeathEvent` | Release victim; creature goes `WAITING` in place |
+| `PlayerDeathEvent` | On victim death, apply `lifetime.unbind-on-victim-death` (§3.8): unbind to `DORMANT` when `true` (default), else retain the binding and go `WAITING` |
 | `PlayerChangedWorldEvent` | Dormancy on dimension change |
+| `PlayerInteractEvent` | Redeem the cursed artifact on right-click (main hand): return XP at the configured ratio (§3.9) |
 
 ### 7.2 Configuration groups
 

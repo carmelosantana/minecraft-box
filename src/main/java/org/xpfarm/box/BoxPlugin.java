@@ -56,8 +56,10 @@ import org.xpfarm.box.service.SpawnService;
  * Plugin entry point: assembles every component (Task 15 capstone wiring).
  *
  * <p><strong>Enable order</strong> (mirrors the reference {@code RedstoneTrainPlugin}).
- * {@code config.yml} is validated into an immutable {@link BoxConfig} first — an invalid file logs
- * the offending key and disables the plugin rather than leaving a half-wired state. Then the
+ * {@code config.yml} is validated into an immutable {@link BoxConfig} first — an out-of-range scalar
+ * falls back to its shipped default (logged as a warning) so one typo'd number never takes the plugin
+ * offline (acceptance check 19); only a structurally broken file disables it gracefully rather than
+ * leaving a half-wired state. Then the
  * config-independent core is built ({@link BoxKeys}, {@link BoxCodec}, {@link BoxRegistry}),
  * creatures are rehydrated from the PDC of every already-loaded world's shulkers, and finally
  * {@link #wireConfigServices} builds everything that holds the config snapshot ({@link StageTable},
@@ -96,6 +98,15 @@ import org.xpfarm.box.service.SpawnService;
  * own tick-loop enforcement (YAGNI). The window is bounded (one offline timeout, only across a
  * restart) and the creature remains lockable by anyone. See the task report.
  *
+ * <h2>Known limitation — the "haunting" cue is configured but not yet scheduled</h2>
+ *
+ * The {@code audio.haunting} sound (Disc 11, to the bound victim alone on an interval) is present in
+ * the config contract but is <strong>not played</strong>: it needs a per-victim interval timer that
+ * does not exist in this tick loop. The other cues — {@code dormant-ambience}, {@code lock-on-sting},
+ * {@code proximity-pulse}, {@code movement}, {@code feeding}, {@code opening}, {@code death} — are all
+ * wired. Scheduling "haunting" is a deferred gate-12/future item; it is left configured so the timer
+ * can be added later without a config change.
+ *
  * <p>Geyser/Bedrock safety: scheduler, PDC, potion effects (Nausea/Darkness/Blindness), titles,
  * {@code playSound}, and commands are all server-side and render identically for Bedrock players via
  * Geyser. No client packets, no NMS.
@@ -122,19 +133,24 @@ public final class BoxPlugin extends JavaPlugin {
 
     @Override
     public void onEnable() {
-        // 1. Validated config snapshot; disable gracefully on a bad config.yml.
+        // 1. Validated config snapshot. Out-of-range scalars fall back to defaults per key (each
+        //    logged as a warning); only a structurally broken config.yml (e.g. a malformed stages
+        //    section) disables the plugin gracefully (acceptance check 19).
         saveDefaultConfig();
-        BoxConfig loaded;
+        BoxConfig.Result loaded;
         try {
-            loaded = BoxConfig.from(getConfig());
-        } catch (IllegalArgumentException invalid) {
-            getLogger().severe("config.yml is invalid: " + invalid.getMessage());
-            getLogger().severe("Fix the value (or delete config.yml to regenerate the defaults) and "
+            loaded = BoxConfig.fromValidated(getConfig());
+        } catch (RuntimeException invalid) {
+            getLogger().severe("config.yml is structurally invalid: " + invalid.getMessage());
+            getLogger().severe("Fix it (or delete config.yml to regenerate the defaults) and "
                     + "restart. Disabling The Box.");
             getServer().getPluginManager().disablePlugin(this);
             return;
         }
-        config = loaded;
+        for (String warning : loaded.warnings()) {
+            getLogger().warning(warning);
+        }
+        config = loaded.config();
 
         // 2. Config-independent core.
         keys = new BoxKeys(this);
@@ -146,7 +162,7 @@ public final class BoxPlugin extends JavaPlugin {
         int restored = rebuildRegistryFromLoadedWorlds();
 
         // 4. Config-holding services, the command, and the scheduled tasks.
-        wireConfigServices(loaded);
+        wireConfigServices(config);
 
         PluginCommand command = Objects.requireNonNull(getCommand("box"),
                 "plugin.yml must declare the box command");
@@ -237,14 +253,18 @@ public final class BoxPlugin extends JavaPlugin {
      */
     private @Nullable String reloadBoxConfig() {
         reloadConfig();
-        BoxConfig fresh;
+        BoxConfig.Result fresh;
         try {
-            fresh = BoxConfig.from(getConfig());
-        } catch (IllegalArgumentException invalid) {
+            fresh = BoxConfig.fromValidated(getConfig());
+        } catch (RuntimeException invalid) {
+            // Only a structural error reaches here; out-of-range scalars are defaulted, not rejected.
             getLogger().warning("Reload rejected: " + invalid.getMessage());
             return invalid.getMessage();
         }
-        wireConfigServices(fresh);
+        for (String warning : fresh.warnings()) {
+            getLogger().warning(warning);
+        }
+        wireConfigServices(fresh.config());
         getLogger().info("Configuration reloaded and services re-wired.");
         return null;
     }

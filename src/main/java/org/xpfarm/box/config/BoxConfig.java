@@ -128,121 +128,134 @@ public record BoxConfig(
     }
 
     /**
+     * A parsed configuration paired with the warnings produced while substituting the shipped
+     * default for any invalid scalar / unknown sound / unknown material. The caller (the plugin)
+     * logs each warning and proceeds with {@link #config()} — a single bad value never disables the
+     * plugin (acceptance check 19). {@link BoxConfig#from(ConfigurationSection)} discards them.
+     *
+     * @param config the validated configuration, with every invalid value defaulted
+     * @param warnings one message per substituted key, in read order; empty when the file was clean
+     */
+    public record Result(BoxConfig config, List<String> warnings) {
+        public Result {
+            warnings = List.copyOf(warnings);
+        }
+    }
+
+    /**
      * Reads and validates a configuration section (typically the plugin's
-     * {@code FileConfiguration}). Missing keys fall back to the shipped defaults.
+     * {@code FileConfiguration}), substituting the shipped default for any out-of-range scalar (or
+     * unknown sound / material name) rather than throwing, and recording a human-readable warning
+     * naming the offending key, its value, and the substitution. Missing keys silently fall back to
+     * their defaults. Only a structurally broken file — a malformed {@code stages} section — still
+     * throws, so the caller can disable gracefully rather than run a half-wired creature. This is the
+     * per-key fall-back that acceptance check 19 requires: one typo'd number never takes the plugin
+     * offline.
      *
      * @param root the configuration root to read from
-     * @return the validated, immutable configuration
-     * @throws IllegalArgumentException if any value is outside its documented range or names
-     *     an unknown material or sound; the message names the offending key and value
+     * @return the validated config paired with the list of substitution warnings (possibly empty)
+     * @throws IllegalArgumentException if the {@code stages} section is structurally invalid
      */
-    public static BoxConfig from(ConfigurationSection root) {
-        boolean spawnEnabled = root.getBoolean("spawn.enabled", false);
-        int checkIntervalSeconds = root.getInt("spawn.check-interval-seconds", 300);
-        double chance = root.getDouble("spawn.chance", 0.08);
-        int minDistance = root.getInt("spawn.min-distance", 24);
-        int maxDistance = root.getInt("spawn.max-distance", 48);
-        int perPlayerCap = root.getInt("spawn.per-player-cap", 1);
-        int serverCap = root.getInt("spawn.server-cap", 4);
-        boolean requireSkyAccess = root.getBoolean("spawn.require-sky-access", true);
-        int nightStart = root.getInt("spawn.night-start", 13000);
-        int nightEnd = root.getInt("spawn.night-end", 23000);
-        int minDistanceFromWorldSpawn = root.getInt("spawn.min-distance-from-world-spawn", 128);
+    public static Result fromValidated(ConfigurationSection root) {
+        List<String> warnings = new ArrayList<>();
 
-        double fovCosine = root.getDouble("gaze.fov-cosine", 0.6);
-        int gazeMaxDistance = root.getInt("gaze.max-distance", 48);
-        int lockOnTicks = root.getInt("gaze.lock-on-ticks", 10);
+        boolean spawnEnabled = root.getBoolean("spawn.enabled", false);
+        int checkIntervalSeconds = defInt(root.getInt("spawn.check-interval-seconds", 300), 300,
+                v -> v >= 0, "spawn.check-interval-seconds", "must be >= 0", warnings);
+        double chance = defDouble(root.getDouble("spawn.chance", 0.08), 0.08,
+                v -> v >= 0.0 && v <= 1.0, "spawn.chance", "must be 0.0 - 1.0", warnings);
+        int minDistance = defInt(root.getInt("spawn.min-distance", 24), 24, v -> v >= 0,
+                "spawn.min-distance", "must be >= 0", warnings);
+        int maxDistance = defInt(root.getInt("spawn.max-distance", 48), 48, v -> v >= 0,
+                "spawn.max-distance", "must be >= 0", warnings);
+        // Cross-constraint: if the band is inverted, reset the whole band to its defaults.
+        if (minDistance > maxDistance) {
+            warnings.add(warnMessage("spawn.min-distance/spawn.max-distance",
+                    minDistance + " > " + maxDistance, "min must be <= max", "24 / 48"));
+            minDistance = 24;
+            maxDistance = 48;
+        }
+        int perPlayerCap = defInt(root.getInt("spawn.per-player-cap", 1), 1, v -> v >= 1,
+                "spawn.per-player-cap", "must be >= 1", warnings);
+        int serverCap = defInt(root.getInt("spawn.server-cap", 4), 4, v -> v >= 0,
+                "spawn.server-cap", "must be >= 0", warnings);
+        boolean requireSkyAccess = root.getBoolean("spawn.require-sky-access", true);
+        int nightStart = defInt(root.getInt("spawn.night-start", 13000), 13000, v -> v >= 0,
+                "spawn.night-start", "must be >= 0", warnings);
+        int nightEnd = root.getInt("spawn.night-end", 23000);
+        // Cross-constraint: if the window is inverted, reset the whole window to its defaults.
+        if (nightStart >= nightEnd) {
+            warnings.add(warnMessage("spawn.night-start/spawn.night-end",
+                    nightStart + " >= " + nightEnd, "start must be < end", "13000 / 23000"));
+            nightStart = 13000;
+            nightEnd = 23000;
+        }
+        int minDistanceFromWorldSpawn = defInt(root.getInt("spawn.min-distance-from-world-spawn",
+                128), 128, v -> v >= 0, "spawn.min-distance-from-world-spawn", "must be >= 0",
+                warnings);
+
+        double fovCosine = defDouble(root.getDouble("gaze.fov-cosine", 0.6), 0.6,
+                v -> v >= -1.0 && v <= 1.0, "gaze.fov-cosine", "must be -1.0 - 1.0", warnings);
+        int gazeMaxDistance = defInt(root.getInt("gaze.max-distance", 48), 48, v -> v >= 0,
+                "gaze.max-distance", "must be >= 0", warnings);
+        int lockOnTicks = defInt(root.getInt("gaze.lock-on-ticks", 10), 10, v -> v >= 0,
+                "gaze.lock-on-ticks", "must be >= 0", warnings);
         boolean ignoreCreative = root.getBoolean("gaze.ignore-creative", true);
         boolean ignoreSpectator = root.getBoolean("gaze.ignore-spectator", true);
 
-        int maxStepUp = root.getInt("movement.max-step-up", 1);
-        int maxStepDown = root.getInt("movement.max-step-down", 3);
-        int maxClimbHeight = root.getInt("movement.max-climb-height", 24);
+        int maxStepUp = defInt(root.getInt("movement.max-step-up", 1), 1, v -> v >= 0,
+                "movement.max-step-up", "must be >= 0", warnings);
+        int maxStepDown = defInt(root.getInt("movement.max-step-down", 3), 3, v -> v >= 0,
+                "movement.max-step-down", "must be >= 0", warnings);
+        int maxClimbHeight = defInt(root.getInt("movement.max-climb-height", 24), 24, v -> v >= 0,
+                "movement.max-climb-height", "must be >= 0", warnings);
         boolean allowCeilingTraversal = root.getBoolean("movement.allow-ceiling-traversal", true);
 
-        int xpPerSecond = root.getInt("feeding.xp-per-second", 8);
+        int xpPerSecond = defInt(root.getInt("feeding.xp-per-second", 8), 8, v -> v >= 0,
+                "feeding.xp-per-second", "must be >= 0", warnings);
         boolean requireXpToOpen = root.getBoolean("feeding.require-xp-to-open", true);
 
         boolean starvationEnabled = root.getBoolean("starvation.enabled", true);
-        int onsetSeconds = root.getInt("starvation.onset-seconds", 300);
-        int maxSeconds = root.getInt("starvation.max-seconds", 1800);
-        double stepIntervalMultiplier = root.getDouble("starvation.step-interval-multiplier", 0.5);
-        double volumeMultiplier = root.getDouble("starvation.volume-multiplier", 1.5);
+        int onsetSeconds = defInt(root.getInt("starvation.onset-seconds", 300), 300, v -> v >= 0,
+                "starvation.onset-seconds", "must be >= 0", warnings);
+        int maxSeconds = defInt(root.getInt("starvation.max-seconds", 1800), 1800, v -> v >= 0,
+                "starvation.max-seconds", "must be >= 0", warnings);
+        double stepIntervalMultiplier = defDouble(
+                root.getDouble("starvation.step-interval-multiplier", 0.5), 0.5, v -> v >= 0,
+                "starvation.step-interval-multiplier", "must be >= 0", warnings);
+        double volumeMultiplier = defDouble(root.getDouble("starvation.volume-multiplier", 1.5),
+                1.5, v -> v >= 0, "starvation.volume-multiplier", "must be >= 0", warnings);
 
         boolean disorientationEnabled = root.getBoolean("disorientation.enabled", true);
-        int nauseaTicks = root.getInt("disorientation.nausea-ticks", 120);
-        int darknessTicks = root.getInt("disorientation.darkness-ticks", 100);
+        int nauseaTicks = defInt(root.getInt("disorientation.nausea-ticks", 120), 120, v -> v >= 0,
+                "disorientation.nausea-ticks", "must be >= 0", warnings);
+        int darknessTicks = defInt(root.getInt("disorientation.darkness-ticks", 100), 100,
+                v -> v >= 0, "disorientation.darkness-ticks", "must be >= 0", warnings);
 
-        double contactRadius = root.getDouble("contact.radius", 1.5);
-        int contactBlindnessTicks = root.getInt("contact.blindness-ticks", 200);
-        int contactNauseaTicks = root.getInt("contact.nausea-ticks", 300);
+        double contactRadius = defDouble(root.getDouble("contact.radius", 1.5), 1.5, v -> v >= 0,
+                "contact.radius", "must be >= 0", warnings);
+        int contactBlindnessTicks = defInt(root.getInt("contact.blindness-ticks", 200), 200,
+                v -> v >= 0, "contact.blindness-ticks", "must be >= 0", warnings);
+        int contactNauseaTicks = defInt(root.getInt("contact.nausea-ticks", 300), 300, v -> v >= 0,
+                "contact.nausea-ticks", "must be >= 0", warnings);
 
-        Material artifactMaterial = readMaterial(root, "artifact.material", "ECHO_SHARD");
+        Material artifactMaterial = readMaterial(root, "artifact.material", "ECHO_SHARD", warnings);
         String artifactName = root.getString("artifact.display-name", "Cursed Artifact");
-        double xpReturnRatio = root.getDouble("artifact.xp-return-ratio", 0.75);
+        double xpReturnRatio = defDouble(root.getDouble("artifact.xp-return-ratio", 0.75), 0.75,
+                v -> v >= 0.0 && v <= 1.0, "artifact.xp-return-ratio", "must be 0.0 - 1.0", warnings);
         boolean curseIntegration = root.getBoolean("artifact.curse-integration", true);
 
-        int offlineDormantMinutes = root.getInt("lifetime.offline-dormant-minutes", 30);
-        int maxLifetimeHours = root.getInt("lifetime.max-lifetime-hours", 0);
+        int offlineDormantMinutes = defInt(root.getInt("lifetime.offline-dormant-minutes", 30), 30,
+                v -> v >= 0, "lifetime.offline-dormant-minutes", "must be >= 0", warnings);
+        int maxLifetimeHours = defInt(root.getInt("lifetime.max-lifetime-hours", 0), 0, v -> v >= 0,
+                "lifetime.max-lifetime-hours", "must be >= 0", warnings);
         boolean unbindOnVictimDeath = root.getBoolean("lifetime.unbind-on-victim-death", true);
 
-        // Range checks. Ordered so the scalar validations run before the stage assembly, so a
-        // bad scalar reports its own key rather than being masked by an unrelated stage error.
-        check(chance >= 0.0 && chance <= 1.0, "spawn.chance", chance, "must be 0.0 - 1.0");
-        check(checkIntervalSeconds >= 0, "spawn.check-interval-seconds", checkIntervalSeconds,
-                "must be >= 0");
-        check(minDistance >= 0, "spawn.min-distance", minDistance, "must be >= 0");
-        check(maxDistance >= 0, "spawn.max-distance", maxDistance, "must be >= 0");
-        check(minDistance <= maxDistance, "spawn.min-distance", minDistance,
-                "must be <= spawn.max-distance (" + maxDistance + ")");
-        check(perPlayerCap >= 1, "spawn.per-player-cap", perPlayerCap, "must be >= 1");
-        check(serverCap >= 0, "spawn.server-cap", serverCap, "must be >= 0");
-        check(nightStart >= 0, "spawn.night-start", nightStart, "must be >= 0");
-        check(nightStart < nightEnd, "spawn.night-start", nightStart,
-                "must be < spawn.night-end (" + nightEnd + ")");
-        check(minDistanceFromWorldSpawn >= 0, "spawn.min-distance-from-world-spawn",
-                minDistanceFromWorldSpawn, "must be >= 0");
-
-        check(fovCosine >= -1.0 && fovCosine <= 1.0, "gaze.fov-cosine", fovCosine,
-                "must be -1.0 - 1.0");
-        check(gazeMaxDistance >= 0, "gaze.max-distance", gazeMaxDistance, "must be >= 0");
-        check(lockOnTicks >= 0, "gaze.lock-on-ticks", lockOnTicks, "must be >= 0");
-
-        check(maxStepUp >= 0, "movement.max-step-up", maxStepUp, "must be >= 0");
-        check(maxStepDown >= 0, "movement.max-step-down", maxStepDown, "must be >= 0");
-        check(maxClimbHeight >= 0, "movement.max-climb-height", maxClimbHeight, "must be >= 0");
-
-        check(xpPerSecond >= 0, "feeding.xp-per-second", xpPerSecond, "must be >= 0");
-
-        check(onsetSeconds >= 0, "starvation.onset-seconds", onsetSeconds, "must be >= 0");
-        check(maxSeconds >= 0, "starvation.max-seconds", maxSeconds, "must be >= 0");
-        check(stepIntervalMultiplier >= 0, "starvation.step-interval-multiplier",
-                stepIntervalMultiplier, "must be >= 0");
-        check(volumeMultiplier >= 0, "starvation.volume-multiplier", volumeMultiplier,
-                "must be >= 0");
-
-        check(nauseaTicks >= 0, "disorientation.nausea-ticks", nauseaTicks, "must be >= 0");
-        check(darknessTicks >= 0, "disorientation.darkness-ticks", darknessTicks, "must be >= 0");
-
-        check(contactRadius >= 0, "contact.radius", contactRadius, "must be >= 0");
-        check(contactBlindnessTicks >= 0, "contact.blindness-ticks", contactBlindnessTicks,
-                "must be >= 0");
-        check(contactNauseaTicks >= 0, "contact.nausea-ticks", contactNauseaTicks,
-                "must be >= 0");
-
-        check(xpReturnRatio >= 0.0 && xpReturnRatio <= 1.0, "artifact.xp-return-ratio",
-                xpReturnRatio, "must be 0.0 - 1.0");
-
-        check(offlineDormantMinutes >= 0, "lifetime.offline-dormant-minutes",
-                offlineDormantMinutes, "must be >= 0");
-        check(maxLifetimeHours >= 0, "lifetime.max-lifetime-hours", maxLifetimeHours,
-                "must be >= 0");
-
-        Map<String, BoxSound> sounds = readSounds(root);
+        Map<String, BoxSound> sounds = readSounds(root, warnings);
         List<StageDef> stages = readStages(root);
 
-        return new BoxConfig(spawnEnabled, checkIntervalSeconds, chance, minDistance, maxDistance,
-                perPlayerCap, serverCap, requireSkyAccess, nightStart, nightEnd,
+        BoxConfig config = new BoxConfig(spawnEnabled, checkIntervalSeconds, chance, minDistance,
+                maxDistance, perPlayerCap, serverCap, requireSkyAccess, nightStart, nightEnd,
                 minDistanceFromWorldSpawn, fovCosine, gazeMaxDistance, lockOnTicks, ignoreCreative,
                 ignoreSpectator, maxStepUp, maxStepDown, maxClimbHeight, allowCeilingTraversal,
                 xpPerSecond, requireXpToOpen, stages, starvationEnabled, onsetSeconds, maxSeconds,
@@ -250,48 +263,104 @@ public record BoxConfig(
                 darknessTicks, contactRadius, contactBlindnessTicks, contactNauseaTicks, sounds,
                 artifactMaterial, artifactName, xpReturnRatio, curseIntegration,
                 offlineDormantMinutes, maxLifetimeHours, unbindOnVictimDeath);
+        return new Result(config, warnings);
     }
 
     /**
-     * Reads the {@code audio.*} events, one {@link BoxSound} per key with its shipped default,
-     * and resolves each name so an unknown sound fails on load rather than at play time.
+     * Convenience over {@link #fromValidated(ConfigurationSection)} that discards the warning list
+     * and returns just the (default-substituted) configuration. Retained for callers and tests that
+     * only need a config; the plugin uses {@link #fromValidated(ConfigurationSection)} so it can log
+     * each substitution.
+     *
+     * @param root the configuration root to read from
+     * @return the validated, immutable configuration with every invalid value defaulted
+     * @throws IllegalArgumentException if the {@code stages} section is structurally invalid
      */
-    private static Map<String, BoxSound> readSounds(ConfigurationSection root) {
+    public static BoxConfig from(ConfigurationSection root) {
+        return fromValidated(root).config();
+    }
+
+    /**
+     * Returns {@code value} when {@code valid}, otherwise records a warning naming the key, the bad
+     * value, and the substitution, and returns {@code fallback}.
+     */
+    private static int defInt(int value, int fallback, java.util.function.IntPredicate valid,
+            String key, String requirement, List<String> warnings) {
+        if (valid.test(value)) {
+            return value;
+        }
+        warnings.add(warnMessage(key, value, requirement, fallback));
+        return fallback;
+    }
+
+    /** The {@code double} counterpart to {@link #defInt}. */
+    private static double defDouble(double value, double fallback,
+            java.util.function.DoublePredicate valid, String key, String requirement,
+            List<String> warnings) {
+        if (valid.test(value)) {
+            return value;
+        }
+        warnings.add(warnMessage(key, value, requirement, fallback));
+        return fallback;
+    }
+
+    /** The single warning format: names the key, the rejected value, the rule, and the default. */
+    private static String warnMessage(String key, Object value, String requirement,
+            Object fallback) {
+        return "Invalid config value for '" + key + "': " + value + " (" + requirement
+                + "); falling back to default " + fallback;
+    }
+
+    /**
+     * Reads the {@code audio.*} events, one {@link BoxSound} per key with its shipped default. An
+     * unknown sound name is defaulted to that key's shipped sound (keeping any configured volume /
+     * pitch) and a warning recorded, so a typo'd sound degrades to the vanilla default rather than
+     * failing startup (acceptance check 19).
+     */
+    private static Map<String, BoxSound> readSounds(ConfigurationSection root,
+            List<String> warnings) {
         ConfigurationSection audio = root.getConfigurationSection("audio");
         Map<String, BoxSound> sounds = new LinkedHashMap<>();
-        putSound(sounds, audio, "dormant-ambience", "BLOCK_SCULK_SENSOR_CLICKING", 0.6f, 0.5f);
-        putSound(sounds, audio, "lock-on-sting", "BLOCK_SCULK_SHRIEKER_SHRIEK", 1.0f, 0.7f);
-        putSound(sounds, audio, "proximity-pulse", "ENTITY_WARDEN_HEARTBEAT", 0.8f, 0.8f);
-        putSound(sounds, audio, "movement", "BLOCK_SCULK_SPREAD", 0.3f, 0.5f);
-        putSound(sounds, audio, "feeding", "ENTITY_EXPERIENCE_ORB_PICKUP", 0.7f, 0.5f);
-        putSound(sounds, audio, "opening", "ENTITY_SHULKER_OPEN", 0.9f, 0.4f);
-        putSound(sounds, audio, "death", "ENTITY_WARDEN_DEATH", 1.0f, 0.6f);
-        putSound(sounds, audio, "haunting", "MUSIC_DISC_11", 0.5f, 1.0f);
+        putSound(sounds, audio, "dormant-ambience", "BLOCK_SCULK_SENSOR_CLICKING", 0.6f, 0.5f,
+                warnings);
+        putSound(sounds, audio, "lock-on-sting", "BLOCK_SCULK_SHRIEKER_SHRIEK", 1.0f, 0.7f,
+                warnings);
+        putSound(sounds, audio, "proximity-pulse", "ENTITY_WARDEN_HEARTBEAT", 0.8f, 0.8f, warnings);
+        putSound(sounds, audio, "movement", "BLOCK_SCULK_SPREAD", 0.3f, 0.5f, warnings);
+        putSound(sounds, audio, "feeding", "ENTITY_EXPERIENCE_ORB_PICKUP", 0.7f, 0.5f, warnings);
+        putSound(sounds, audio, "opening", "ENTITY_SHULKER_OPEN", 0.9f, 0.4f, warnings);
+        putSound(sounds, audio, "death", "ENTITY_WARDEN_DEATH", 1.0f, 0.6f, warnings);
+        putSound(sounds, audio, "haunting", "MUSIC_DISC_11", 0.5f, 1.0f, warnings);
         return sounds;
     }
 
     private static void putSound(Map<String, BoxSound> out, ConfigurationSection audio, String key,
-            String defSound, float defVol, float defPitch) {
+            String defSound, float defVol, float defPitch, List<String> warnings) {
         ConfigurationSection s = audio == null ? null : audio.getConfigurationSection(key);
         BoxSound sound = BoxSound.from(s, defSound, defVol, defPitch);
-        checkSoundName("audio." + key + ".sound", sound.sound());
+        if (!isKnownSoundName(sound.sound())) {
+            warnings.add(warnMessage("audio." + key + ".sound", sound.sound(), "unknown sound",
+                    defSound));
+            // Keep the operator's volume / pitch / interval; only the bad sound name is replaced.
+            sound = new BoxSound(defSound, sound.volume(), sound.pitch(), sound.intervalSeconds());
+        }
         out.put(key, sound);
     }
 
     /**
-     * Validates a {@link org.bukkit.Sound} constant name at load time without initializing the
-     * {@code Sound} class. {@code Sound} is a registry-backed interface in this API version; its
-     * class initializer walks {@code Registry.SOUNDS} and throws when no server is running, so
-     * {@link BoxSound#resolve()} (which reads a constant) is safe only at play time. A reflective
-     * {@code getField} lookup checks the name against the class structure without triggering that
-     * initializer, so a bad name fails on load here and on any machine, server or not.
+     * Whether {@code name} is a real {@link org.bukkit.Sound} constant, checked at load time without
+     * initializing the {@code Sound} class. {@code Sound} is a registry-backed interface in this API
+     * version; its class initializer walks {@code Registry.SOUNDS} and throws when no server is
+     * running, so {@link BoxSound#resolve()} (which reads a constant) is safe only at play time. A
+     * reflective {@code getField} lookup checks the name against the class structure without
+     * triggering that initializer, so the name is verifiable here on any machine, server or not.
      */
-    private static void checkSoundName(String key, String name) {
+    private static boolean isKnownSoundName(String name) {
         try {
             org.bukkit.Sound.class.getField(name);
+            return true;
         } catch (NoSuchFieldException e) {
-            throw new IllegalArgumentException(
-                    "Invalid config value for '" + key + "': " + name + " (unknown sound)");
+            return false;
         }
     }
 
@@ -344,13 +413,19 @@ public record BoxConfig(
         return stages;
     }
 
-    private static Material readMaterial(ConfigurationSection root, String key, String def) {
+    /**
+     * Resolves a {@link Material} name, defaulting an unknown name to {@code def} (a known-valid
+     * constant) with a recorded warning rather than throwing, so a typo'd material degrades safely
+     * (acceptance check 19).
+     */
+    private static Material readMaterial(ConfigurationSection root, String key, String def,
+            List<String> warnings) {
         String name = root.getString(key, def);
         try {
             return Material.valueOf(name);
         } catch (IllegalArgumentException e) {
-            throw new IllegalArgumentException(
-                    "Invalid config value for '" + key + "': " + name + " (unknown material)");
+            warnings.add(warnMessage(key, name, "unknown material", def));
+            return Material.valueOf(def);
         }
     }
 

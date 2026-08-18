@@ -26,18 +26,21 @@ import org.bukkit.event.Listener;
 import org.bukkit.event.entity.EntityDamageEvent;
 import org.bukkit.event.entity.EntityDeathEvent;
 import org.bukkit.event.entity.EntityTargetLivingEntityEvent;
+import org.bukkit.event.block.Action;
 import org.bukkit.event.entity.PlayerDeathEvent;
 import org.bukkit.event.entity.ProjectileLaunchEvent;
 import org.bukkit.event.player.PlayerChangedWorldEvent;
+import org.bukkit.event.player.PlayerInteractEvent;
 import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.event.world.EntitiesLoadEvent;
+import org.bukkit.inventory.EquipmentSlot;
 import org.bukkit.inventory.ItemStack;
 import org.xpfarm.box.config.BoxConfig;
 import org.xpfarm.box.model.BoxState;
 import org.xpfarm.box.persistence.BoxCodec;
 import org.xpfarm.box.persistence.BoxRegistry;
-import org.xpfarm.box.service.ArtifactSource;
+import org.xpfarm.box.service.ArtifactService;
 import org.xpfarm.box.service.SoundPlayer;
 
 /**
@@ -47,9 +50,11 @@ import org.xpfarm.box.service.SoundPlayer;
  *
  * <p>Almost every handler here touches a running server's entities, worlds, drops, and players, which
  * cannot be faithfully mocked, so they are <strong>gate-7a</strong> obligations documented per method
- * rather than unit-tested. The one pure, unit-testable seam is {@link #vulnerable(double)} — the
- * damage-gate predicate that decides, from a shulker's {@code getPeek()}, whether damage lands. It is
- * covered exhaustively by {@code DamageGateTest} (acceptance check 7).
+ * rather than unit-tested. Two pure, unit-testable seams are carved out: {@link #vulnerable(double)},
+ * the damage-gate predicate that decides, from a shulker's {@code getPeek()}, whether damage lands
+ * (covered exhaustively by {@code DamageGateTest}, acceptance check 7); and
+ * {@link #shouldRedeem(boolean, boolean, boolean)}, the right-click artifact-redemption decision
+ * (covered by {@code RedemptionGateTest}, acceptance checks 12/18/22).
  *
  * <h2>The vanilla-teleport-vs-our-movement decision (deliberate omission)</h2>
  *
@@ -93,7 +98,7 @@ public final class BoxLifecycleListener implements Listener {
     private final BoxRegistry registry;
     private final BoxCodec codec;
     private final BoxConfig config;
-    private final ArtifactSource artifacts;
+    private final ArtifactService artifacts;
     private final SoundPlayer sounds;
     private final LongSupplier nowSecond;
 
@@ -112,11 +117,12 @@ public final class BoxLifecycleListener implements Listener {
      * @param codec reads {@link BoxState} back from an entity PDC on chunk load
      * @param config supplies {@code lifetime.offline-dormant-minutes} and
      *     {@code lifetime.unbind-on-victim-death}
-     * @param artifacts the seam that mints the death-drop artifact from banked XP (Task 14)
+     * @param artifacts mints the death-drop artifact from banked XP and redeems it on right-click
+     *     ({@link ArtifactService#isArtifact}/{@link ArtifactService#consume})
      * @param sounds the sound adapter used for the death cue
      */
     public BoxLifecycleListener(BoxRegistry registry, BoxCodec codec, BoxConfig config,
-            ArtifactSource artifacts, SoundPlayer sounds) {
+            ArtifactService artifacts, SoundPlayer sounds) {
         this(registry, codec, config, artifacts, sounds,
                 () -> Instant.now().getEpochSecond());
     }
@@ -127,7 +133,7 @@ public final class BoxLifecycleListener implements Listener {
      * @param nowSecond supplies the current epoch second
      */
     public BoxLifecycleListener(BoxRegistry registry, BoxCodec codec, BoxConfig config,
-            ArtifactSource artifacts, SoundPlayer sounds, LongSupplier nowSecond) {
+            ArtifactService artifacts, SoundPlayer sounds, LongSupplier nowSecond) {
         this.registry = Objects.requireNonNull(registry, "registry");
         this.codec = Objects.requireNonNull(codec, "codec");
         this.config = Objects.requireNonNull(config, "config");
@@ -205,6 +211,53 @@ public final class BoxLifecycleListener implements Listener {
     }
 
     /**
+     * The redemption-eligibility decision, pure and side-effect free: a right-click redeems the
+     * artifact only when it is the <em>main</em> hand's action (so the paired off-hand fire of a
+     * single click never double-redeems), the click is a right-click (air or block), and the item in
+     * that hand is one of our artifacts. Extracted so the whole guard is provable headlessly; the
+     * live {@link ArtifactService#consume} it gates (PDC read, {@code giveExp}, console dispatch)
+     * remains a gate-7a obligation (acceptance checks 12, 18, 22).
+     *
+     * @param mainHand whether the interaction is the main hand's ({@code event.getHand() == HAND})
+     * @param rightClick whether the action is a right-click on air or a block
+     * @param isArtifact whether the item in hand is a Box artifact
+     * @return {@code true} when the interaction should attempt redemption
+     */
+    public static boolean shouldRedeem(boolean mainHand, boolean rightClick, boolean isArtifact) {
+        return mainHand && rightClick && isArtifact;
+    }
+
+    /**
+     * Redeems the cursed artifact on a right-click: when the player right-clicks (air or block) with
+     * an artifact in the main hand, the vanilla use of that click is cancelled and
+     * {@link ArtifactService#consume(Player, ItemStack)} returns the configured share of the banked
+     * XP (and, when TheCurse is installed and enabled, starts a curse). The main-hand guard
+     * ({@code event.getHand() == HAND}) prevents the paired off-hand fire of a single click from
+     * redeeming twice. This is the sole handler that reaches the artifact's redemption half — without
+     * it the {@code ECHO_SHARD} artifact (not edible, so no vanilla consume event fires) could never
+     * be spent.
+     *
+     * <p>The eligibility decision is the pure {@link #shouldRedeem(boolean, boolean, boolean)} seam
+     * (unit-tested); the live {@code consume} path — reading the item PDC, granting XP, and
+     * dispatching the curse command — is a <strong>gate-7a</strong> obligation (acceptance checks 12,
+     * 18, 22).
+     */
+    @EventHandler(ignoreCancelled = true)
+    public void onInteract(PlayerInteractEvent event) {
+        boolean mainHand = event.getHand() == EquipmentSlot.HAND;
+        Action action = event.getAction();
+        boolean rightClick = action == Action.RIGHT_CLICK_AIR
+                || action == Action.RIGHT_CLICK_BLOCK;
+        ItemStack item = event.getItem();
+        if (!shouldRedeem(mainHand, rightClick, artifacts.isArtifact(item))) {
+            return;
+        }
+        // Cancel the vanilla use of this click (e.g. block activation) before consuming.
+        event.setCancelled(true);
+        artifacts.consume(event.getPlayer(), item);
+    }
+
+    /**
      * Suppresses vanilla shulker bullets for tracked creatures (acceptance check 1): the creature is a
      * silent stalker, not a turret. Belt-and-suspenders over {@code setAI(false)}.
      *
@@ -237,7 +290,15 @@ public final class BoxLifecycleListener implements Listener {
      * Rehydrates in-memory state when a chunk's entities load: every shulker carrying our PDC marker
      * is decoded via the {@link BoxCodec} and (re)tracked in the {@link BoxRegistry}, so a creature
      * that survived a chunk unload or a server restart is driven again with its stage, victim, and
-     * banked XP intact (acceptance check 13). Re-tracking is idempotent.
+     * banked XP intact (acceptance check 13).
+     *
+     * <p><strong>An already-tracked id is skipped</strong> — the same guard the enable-time
+     * {@code rebuildRegistryFromLoadedWorlds} uses. On a genuine restart the registry is empty so
+     * rehydration runs fully; but mid-session the in-memory {@link BoxState} is newer than the entity
+     * PDC (the tick loop cannot flush a creature whose chunk is unloaded), so re-reading the stale PDC
+     * on chunk reload would clobber newer state — e.g. resurrect a binding an intervening victim-death
+     * unbind already released, resuming a hunt on a dead victim (acceptance check 21). Skipping
+     * tracked ids preserves the newer state.
      *
      * <p><strong>Live path (gate 7a) — acceptance check 13.</strong>
      */
@@ -246,6 +307,9 @@ public final class BoxLifecycleListener implements Listener {
         for (Entity entity : event.getEntities()) {
             if (!(entity instanceof Shulker shulker)) {
                 continue;
+            }
+            if (registry.get(shulker.getUniqueId()).isPresent()) {
+                continue; // newer in-memory state wins; do not overwrite it with stale PDC
             }
             Optional<BoxState> state = codec.read(shulker.getPersistentDataContainer());
             state.ifPresent(s -> registry.track(shulker.getUniqueId(), s));

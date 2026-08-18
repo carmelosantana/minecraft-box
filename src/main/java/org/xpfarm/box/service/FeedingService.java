@@ -220,11 +220,16 @@ public final class FeedingService {
      * @param box the live creature to open and grow
      * @param s the creature's mutable state (bank and stage index are updated in place)
      * @param gazer the qualifying watcher whose experience is drained
-     * @param tickCounter the global tick counter (used only to vary cosmetic particle placement;
-     *     not load-bearing)
+     * @param iterationCounter the monotonic loop-iteration counter (used only to vary cosmetic
+     *     particle placement; not load-bearing)
      */
-    public void feedTick(Shulker box, BoxState s, Player gazer, long tickCounter) {
-        // Open and expose: a fully-peeked shulker is vulnerable, which is the point.
+    public void feedTick(Shulker box, BoxState s, Player gazer, long iterationCounter) {
+        // Open and expose: a fully-peeked shulker is vulnerable, which is the point. Play the
+        // "opening" cue only on the open transition (shell was sealed this tick), not every feed
+        // tick while it loiters open, so the sound marks the moment it cracks open to feed.
+        if (box.getPeek() <= 0.0f) {
+            sounds.play(box.getLocation(), "opening");
+        }
         box.setPeek(1.0f);
 
         // Exact fractional points owed this tick, run through the per-creature carry so the long-run
@@ -246,7 +251,7 @@ public final class FeedingService {
             s.bank(removed);
         }
 
-        streamFeedParticles(box, gazer, tickCounter);
+        streamFeedParticles(box, gazer, iterationCounter);
         sounds.play(box.getLocation(), "feeding");
         applyStageIfChanged(box, s);
     }
