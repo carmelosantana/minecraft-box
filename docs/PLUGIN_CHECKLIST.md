@@ -236,15 +236,15 @@ Everything the gate *could* reach — enable, command surface, config reload + f
 ## 8. CI/CD
 
 - [x] Identical standard plugin Actions workflow is installed with the required triggers, Temurin 25 build, artifact, checksum, and release behavior. `.github/workflows/build.yml` matches `GITHUB_ACTIONS.md` exactly — triggers on push to `main`, `v*` tags, PRs targeting `main`, and `workflow_dispatch`; `actions/checkout@v7`; `actions/setup-java@v5` with Temurin 25 and the Maven cache; `mvn --batch-mode --no-transfer-progress clean verify`; checksums generated from inside `target/` so `SHA256SUMS.txt` records bare filenames rather than `target/`-prefixed paths; `actions/upload-artifact@v7` excluding `original-*`; tag runs use `gh release view` / `gh release create` then upload with `--clobber`.
-- [ ] Successful main Actions run is recorded before tagging. **Not this skill's to tick** — `minecraft-plugin-release` owns gate 8b, and it must verify the run for the commit actually being tagged, which does not exist yet. Recorded as scaffold evidence only: the first two `main` pushes both concluded `success` — run `32073852618` on `0e7b423` and run `32073960252` on `9995c20`. Later pushes are not covered by this note.
+- [x] Successful main Actions run is recorded before tagging. The tagged commit `2e76351`'s own main-branch run `32086287312` concluded `completed/success` before `v0.1.0` was tagged on it. (The code commit `e56191e` and every prior main push were also green.)
 - [x] Workflow permissions contain no broader access than the documented contract. `permissions: contents: write` and nothing else.
 
 ## 9. Release
 
-- [ ] Semantic version matches the POM, plugin metadata, and `v<version>` tag.
-- [ ] Successful tag Actions run and GitHub release are recorded.
-- [ ] Release contains exactly one updater-matching JAR plus `SHA256SUMS.txt` and no `original-*` JAR.
-- [ ] Downloaded release assets pass `sha256sum --check SHA256SUMS.txt`.
+- [x] Semantic version matches the POM, plugin metadata, and `v<version>` tag. `pom.xml <version>0.1.0`, embedded `plugin.yml` version `0.1.0` (from `${project.version}`), tag `v0.1.0` — all consistent.
+- [x] Successful tag Actions run and GitHub release are recorded. Tag run `32086329868` on `2e76351` concluded `completed/success`; release `v0.1.0` published stable/non-draft/non-prerelease.
+- [x] Release contains exactly one updater-matching JAR plus `SHA256SUMS.txt` and no `original-*` JAR. Assets: `box-0.1.0.jar`, `SHA256SUMS.txt`. No `original-*`.
+- [x] Downloaded release assets pass `sha256sum --check SHA256SUMS.txt`. `box-0.1.0.jar: OK` against a flat download.
 
 ## 10. Updater
 
