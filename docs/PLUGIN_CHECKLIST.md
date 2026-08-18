@@ -248,10 +248,10 @@ Everything the gate *could* reach — enable, command surface, config reload + f
 
 ## 10. Updater
 
-- [ ] Updater manifest/tests cover repository, destination, anchored asset regex, legacy globs, enabled state, and optional pin.
-- [ ] Fresh install, upgrade, no-op, legacy archival, endpoint failure, and checksum failure behaviors pass.
-- [ ] Updater dry-run uses a disposable directory and never a production plugin directory.
-- [ ] Failure retains the installed JAR and default fail-open behavior permits Minecraft startup.
+- [x] Updater manifest/tests cover repository, destination, anchored asset regex, legacy globs, enabled state, and optional pin. Enrolled in `carmelosantana/minecraft-plugin-updater` `plugins.json` (commit `3fff78d`, roster 19 → 20): `repo carmelosantana/minecraft-box`, `destination box.jar` (unique), `asset_regex ^box-[0-9].*\.jar$` (anchored), `legacy_globs ["box-[0-9]*.jar"]`, `enabled` absent = default true (no pin — follows latest stable). `python3 -m json.tool` valid; 11 updater unit tests pass.
+- [x] Fresh install, upgrade, no-op, legacy archival, endpoint failure, and checksum failure behaviors pass. Box-only manifest dry-run + real-then-repeat against a disposable sandbox: fresh install → `would install v0.1.0`; real install → `installed v0.1.0` (76580-byte box.jar); repeat → `already current (v0.1.0)`; replacement of corrupted destination → re-`installed v0.1.0` with the stale copy backed up; legacy `box-0.0.9.jar` → `archived legacy JARs: box-0.0.9.jar` (glob matches the versioned JAR, not `box.jar`). Endpoint/download/checksum failures are covered by the updater's 11 unit tests (patched-failure pattern).
+- [x] Updater dry-run uses a disposable directory and never a production plugin directory. All invocations targeted a `/tmp/.../scratchpad/updater-dry` sandbox with `--plugins-dir`, `--state-file`, and `--backup-dir` all inside it; the production `/minecraft` volume was never touched. Sandbox discarded after.
+- [x] Failure retains the installed JAR and default fail-open behavior permits Minecraft startup. The updater is fail-open by default (a plugin-level failure warns and continues, non-`--strict`); the installed JAR is left untouched on failure — verified by the unit suite's install/backup/failure tests.
 
 ## 11. Deployment
 
