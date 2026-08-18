@@ -264,9 +264,9 @@ nothing — not release, not enrolment, not handoff.
 
 ## 12. Handoff
 
-- [ ] Current-state documentation refreshed with release, CI, updater, deployment, and local pending state.
-- [ ] Known limitations, skipped checks, configuration or migration notes, rollback guidance, and follow-up owner are recorded.
-- [ ] Evidence distinguishes source commit, published tag/release, updater state, and deployed state without exposing secrets.
-- [ ] Client play-test obligation recorded with a named owner and a target date: `<owner>` / `<date>`.
-- [ ] Client play-test outcome recorded once performed, covering Java join, Bedrock join, and any form, inventory, or rendered item behavior this plugin introduces. Leave unchecked with the owner and date above until the team has run it; an unchecked box here does not block a release, but an unrecorded obligation is a gate 12 failure.
-- [ ] Public deployment reachability confirmed during that pass: `play.xpfarm.org` reaches the intended Java and Bedrock entry points.
+- [x] Current-state documentation refreshed with release, CI, updater, deployment, and local pending state. `xpfarm-plugin-toolkit/CURRENT_STATE.md` updated (commit `b944e0d`): "The Box `v0.1.0` Handoff" section with the four-state snapshot, the release table row, the Deployment Status bullet, the Client Play-Test entry, the roster 19→20 note, and Local Pending Changes. Committed local-only (see the toolkit-remote flag below).
+- [x] Known limitations, skipped checks, configuration or migration notes, rollback guidance, and follow-up owner are recorded. Limitations (live behavior client-unverified, `haunting` unscheduled, `SCALE` Bedrock-unverified, offline-expiry join-time-only, `spawn.enabled` false, entombment deferred), the **skipped 7b matrix** (roster 19→20 trigger not run), config summary, rollback-by-removal, and owner **Carmelo Santana** all recorded in the handoff section.
+- [x] Evidence distinguishes source commit, published tag/release, updater state, and deployed state without exposing secrets. Four states kept distinct: source `minecraft-box@2e76351`, published `v0.1.0` (runs `32086287312`/`32086329868`), updater `box.jar`@`3fff78d`, deployed unknown-to-toolkit. No secrets recorded.
+- [x] Client play-test obligation recorded with a named owner and a target date: `Carmelo Santana` / `2026-08-24`. The nine client-unverified behaviors (spawn/gaze/lock-on/feed-kill/movement-climb-ceiling-seal/persistence/death/**artifact redemption incl. RIGHT_CLICK_AIR**/Bedrock feel) are itemized in the toolkit's Client Play-Test Obligation section.
+- [ ] Client play-test outcome recorded once performed, covering Java join, Bedrock join, and any form, inventory, or rendered item behavior this plugin introduces. **Not yet run** — deferred to the team play-test on `play.xpfarm.org` (owner + date above). An unchecked box here does not block anything; the obligation is tracked, not silent.
+- [ ] Public deployment reachability confirmed during that pass: `play.xpfarm.org` reaches the intended Java and Bedrock entry points. **Not yet run** — folded into the same play-test pass above.
